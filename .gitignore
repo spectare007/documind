@@ -1,0 +1,34 @@
+# Knowledge-base documents — personal/private data, never committed
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.uv/
+dist/
+build/
+
+# Environment & secrets
+.env
+*.env
+!.env.example
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Evaluation run outputs (reports are committed from doc/, raw runs are not)
+evaluation/runs/
