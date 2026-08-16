@@ -45,3 +45,17 @@ def test_job_progress(session):
     got = repo.get(job.id)
     assert (got.completed_documents, got.failed_documents, got.status) == (2, 1, "completed")
     assert got.finished_at is not None
+
+
+def test_document_mutator_raises_for_unknown_id(session):
+    from app.db.repository import DocumentRepository, RecordNotFoundError
+    repo = DocumentRepository(session)
+    with pytest.raises(RecordNotFoundError):
+        repo.mark_processing("does-not-exist")
+
+
+def test_job_mutator_raises_for_unknown_id(session):
+    from app.db.repository import JobRepository, RecordNotFoundError
+    repo = JobRepository(session)
+    with pytest.raises(RecordNotFoundError):
+        repo.update_progress("does-not-exist", completed=1, failed=0)
