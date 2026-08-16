@@ -41,6 +41,16 @@ import httpx
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = "http://localhost:8000"
 
+# Resolve the app's own configured judge model as this script's default, so
+# `DOCUMIND_JUDGE_MODEL` (documented in README.md and .env.example) is
+# actually read by something instead of being a dead setting. `--judge-model`
+# still overrides it per-run (e.g. to substitute a smaller model to fit a
+# CPU time budget, as the recorded run in doc/evaluation-report.md did).
+sys.path.insert(0, str(ROOT / "backend"))
+from app.core.config import get_settings  # noqa: E402
+
+_DEFAULT_JUDGE_MODEL = get_settings().judge_model
+
 METRIC_NAMES = ("faithfulness", "answer_relevancy", "context_precision", "context_recall")
 
 
@@ -193,7 +203,7 @@ def _fmt_score(cell: dict) -> str:
 
 
 def write_report(all_results: dict, out_path: Path, corpus_note: str, golden_subset: list[dict],
-                  golden_total: int, subset_reason: str = "", judge_model: str = "qwen2.5:7b",
+                  golden_total: int, subset_reason: str = "", judge_model: str = _DEFAULT_JUDGE_MODEL,
                   embed_model: str = "nomic-embed-text") -> None:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     question_count = len(golden_subset)
@@ -320,7 +330,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--modes", nargs="+", default=["simple", "agentic"])
     parser.add_argument("--api-key", default="documind-dev-key")
-    parser.add_argument("--judge-model", default="qwen2.5:7b")
+    parser.add_argument("--judge-model", default=_DEFAULT_JUDGE_MODEL)
     parser.add_argument("--embed-model", default="nomic-embed-text")
     parser.add_argument("--ollama-url", default="http://localhost:11434")
     parser.add_argument(

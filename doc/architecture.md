@@ -85,7 +85,7 @@ flowchart LR
 
 ## 3. Agentic pipeline (corrective RAG)
 
-`app.pipelines.agentic.AgenticPipeline` owns this state machine; `app.agents.stages.CrewStages` owns turning each state into one CrewAI crew kickoff (a single agent, single task, run to completion) and parsing its output. Six agent roles: Router, Query Rewriter, Researcher, Relevance Grader, Answer Synthesizer, Groundedness Checker.
+`app.pipelines.agentic.AgenticPipeline` owns this state machine; `app.agents.stages.CrewStages` owns turning each state into either a CrewAI crew kickoff (a single agent, single task, run to completion) or, for one stage, a direct LLM call, and parsing its output. Five CrewAI agent roles: Router, Query Rewriter, Researcher, Answer Synthesizer, Groundedness Checker. The sixth stage, Relevance Grading, is *not* a CrewAI agent: `CrewStages.grade()` calls `self.llm.call(...)` directly, with no `Agent`, `Task`, or `Crew` involved, because wrapping the per-chunk yes/no verdict in a CrewAI `Agent` was measured to invert the model's judgment. See ADR-9 in `doc/design-decisions.md` for the full account of that failure and the fix.
 
 ```mermaid
 stateDiagram-v2

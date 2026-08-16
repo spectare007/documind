@@ -1,16 +1,16 @@
 # DocuMind
 
-DocuMind is a document search platform with an agentic, self-correcting RAG backend. Drop PDFs into a folder, ingest them, and ask questions about them through a normal chat UI (OpenWebUI) or a plain REST API. The backend is a FastAPI service that combines Docling for PDF parsing, LlamaIndex + PGVector for hybrid retrieval, CrewAI for a six-stage corrective-RAG crew, Ollama for fully local inference, and Arize Phoenix for tracing and prompt management.
+DocuMind is a document search platform with an agentic, self-correcting RAG backend. Drop PDFs into a folder, ingest them, and ask questions about them through a normal chat UI (OpenWebUI) or a plain REST API. The backend is a FastAPI service that combines Docling for PDF parsing, LlamaIndex + PGVector for hybrid retrieval, CrewAI for a five-role corrective-RAG crew plus a direct-call relevance grading stage (see ADR-9 in `doc/design-decisions.md`), Ollama for fully local inference, and Arize Phoenix for tracing and prompt management.
 
 It was built as a technical assessment: mandated stack (Docling, PGVector, LlamaIndex, CrewAI, Ollama, Phoenix, RAGAs, OpenWebUI), CPU-only, one-command startup.
 
 **What it does:**
 
-- **Agentic corrective RAG.** A CrewAI crew routes, rewrites, retrieves, grades, synthesizes, and checks its own answer for groundedness, with two independently bounded correction loops (bad retrieval triggers one rewrite retry; an ungrounded answer triggers one regeneration).
+- **Agentic corrective RAG.** A CrewAI crew routes, rewrites, retrieves, synthesizes, and checks its own answer for groundedness. The relevance-grading step in between runs as a direct LLM call rather than a CrewAI agent, because wrapping it in a CrewAI `Agent`/`Task` was measured to invert the model's judgment (see ADR-9 in `doc/design-decisions.md`). Two independently bounded correction loops (bad retrieval triggers one rewrite retry; an ungrounded answer triggers one regeneration).
 - **Hybrid search.** Every query combines dense vector similarity (PGVector/HNSW cosine) with Postgres full-text search (GIN on `tsvector`), fused by LlamaIndex, so exact identifiers (invoice numbers, acknowledgement numbers) are not lost to pure embedding similarity.
 - **Full tracing.** Every HTTP request, agent step, tool call, and LLM completion is exported to Phoenix as an OpenTelemetry span, with prompts, completions, and token counts.
 - **PromptOps.** All agent prompts live in git-versioned YAML, sync to Phoenix's prompt hub on startup, and are pulled back at runtime so a prompt edited in the Phoenix UI takes effect without a code change or redeploy.
-- **Evaluation.** An offline RAGAs harness (`scripts/evaluate.py`) scores the agentic pipeline against a naive one-shot baseline on a hand-curated golden set, judged by a local model. See `doc/evaluation-report.md` (produced separately; see Section 8).
+- **Evaluation.** An offline RAGAs harness (`scripts/evaluate.py`) scores the agentic pipeline against a naive one-shot baseline on a hand-curated golden set, judged by a local model. See `doc/evaluation-report.md` (see Section 7).
 - **OpenAI-compatible API.** OpenWebUI talks to DocuMind as if it were a normal OpenAI-compatible chat model; no custom OpenWebUI plugin code.
 
 ---
@@ -94,10 +94,11 @@ curl http://localhost:8000/api/v1/ingest/<job_id> -H "Authorization: Bearer <you
 
 **Expected latency (CPU, no GPU):** this is the part most likely to look "stuck" if you don't know what to expect.
 
-- **Agentic mode** (`DOCUMIND_PIPELINE_MODE=agentic`, the default): a full answer runs the crew's six stages, some of which loop. Measured live against the real ingested corpus: the crew graph itself completes in ~29 seconds, ~37 seconds end to end over HTTP. Typical case is 5-8 LLM completions; the per-chunk relevance grader can add up to `retrieval_top_k` (default 6) more single-token completions on top of that if a correction loop fires. This is the pipeline the assessment is built around: the user requirement was explicitly to trade latency for agentic depth (full corrective crew, not a leaner one) rather than optimize for speed. See `doc/design-decisions.md` for that decision.
-- **Simple mode** (`DOCUMIND_PIPELINE_MODE=simple`, or `"mode": "simple"` per request on `/api/v1/query`): retrieve once, synthesize once, no grading or self-correction. Measured live: ~25 seconds for a real question against the ingested corpus. This is both the fast-path escape hatch and the "naive RAG" baseline the evaluation report compares the agentic pipeline against.
-- The chat UI streams stage-status updates ("Routing...", "Retrieving...", "Grading context...") inside a collapsible "thinking" panel while the agentic pipeline runs, specifically so a 30-60 second wait doesn't look like a hang.
+- **Agentic mode** (`DOCUMIND_PIPELINE_MODE=agentic`, the default): a full answer runs the crew's stages (route, rewrite, retrieve, grade, synthesize, check), some of which loop. Measured against the real, fully populated 6-document corpus across all 25 golden-set questions (full distribution in `doc/evaluation-report.md`): **min 60s, median (p50) 125s, mean 132s, max 258s.** An earlier ~29s/~37s figure that circulated during development was measured against an empty index (no documents ingested yet), which short-circuits retrieval and grading and is not representative; the numbers above are the honest, corpus-backed ones and supersede it everywhere in this project's docs. Typical case is 5-8 LLM completions; the per-chunk relevance grader can add up to `retrieval_top_k` (default 6) more single-token completions on top of that if a correction loop fires. This is the pipeline the assessment is built around: the user requirement was explicitly to trade latency for agentic depth (full corrective crew, not a leaner one) rather than optimize for speed. See `doc/design-decisions.md` for that decision.
+- **Simple mode** (`DOCUMIND_PIPELINE_MODE=simple`, or `"mode": "simple"` per request on `/api/v1/query`): retrieve once, synthesize once, no grading or self-correction. Measured against the real corpus at 25 to 82 seconds per question, depending on the question (see `doc/evaluation-report.md`). This is both the fast-path escape hatch and the "naive RAG" baseline the evaluation report compares the agentic pipeline against.
+- The chat UI streams stage-status updates ("Routing...", "Retrieving...", "Grading context...") inside a collapsible "thinking" panel while the agentic pipeline runs, specifically so a long wait doesn't look like a hang.
 - None of the above is a timeout misconfiguration: it is real CPU inference time for a 3B generation model doing several sequential completions. If you have a GPU-backed Ollama, point `DOCUMIND_OLLAMA_BASE_URL` at it and latency drops accordingly; nothing else in the design assumes CPU.
+- Agentic mode also has a measured recall limitation (it refuses more than it should on some real questions); see the callout at the top of Section 7 before you pick a mode for a demo.
 
 ---
 
@@ -114,7 +115,7 @@ Every setting is a `DOCUMIND_`-prefixed environment variable (via `pydantic-sett
 | `DOCUMIND_LLM_MODEL` | `qwen2.5:3b` | Generation model for routing, rewriting, grading, synthesis, and the hallucination check. |
 | `DOCUMIND_EMBED_MODEL` | `nomic-embed-text` | Embedding model, 768 dimensions. |
 | `DOCUMIND_EMBED_DIM` | `768` | Must match `embed_model`'s output size; used to size the PGVector column. |
-| `DOCUMIND_JUDGE_MODEL` | `qwen2.5:7b` | Larger local model used only by the offline RAGAs evaluation harness. |
+| `DOCUMIND_JUDGE_MODEL` | `qwen2.5:7b` | Default judge model for the offline RAGAs evaluation harness (`scripts/evaluate.py`'s `--judge-model` defaults to this setting); override with `--judge-model` for a run that needs a smaller/faster judge. |
 | `DOCUMIND_LLM_TIMEOUT_SECONDS` | `180.0` | Timeout for a single LLM completion. |
 | `DOCUMIND_PIPELINE_MODE` | `agentic` | `agentic` (full corrective crew) or `simple` (retrieve-then-synthesize baseline). Overridable per request on `/api/v1/query`. |
 | `DOCUMIND_RETRIEVAL_TOP_K` | `6` | Chunks retrieved per query, and the cap on how many chunks the per-chunk grader will grade. |
@@ -156,9 +157,9 @@ Interactive docs: `http://localhost:8000/docs` (Swagger UI, auto-generated from 
 
 Open Phoenix at `http://localhost:6006`.
 
-**Tracing.** Every request produces a trace tree: a root HTTP server span (via `opentelemetry-instrumentation-fastapi`), a `CHAIN` span per CrewAI crew kickoff, an `AGENT` span per role (Router, Rewriter, Researcher, Grader, Synthesizer, Checker), a `TOOL` span for each `document_search` call, `LlamaIndex` retriever/embedding spans underneath it, and `LLM` `ChatCompletion` spans carrying the actual prompt, completion, model name, and token counts. A `correlation.id` attribute ties every span in a request back to its `X-Correlation-ID` log lines. Live traces were confirmed to carry a non-zero trace id end to end.
+**Tracing.** Every request produces a trace tree: a root HTTP server span (via `opentelemetry-instrumentation-fastapi`), a `CHAIN` span per CrewAI crew kickoff, an `AGENT` span per CrewAI role (Router, Rewriter, Researcher, Synthesizer, Checker; five roles, not six), a `TOOL` span for each `document_search` call, `LlamaIndex` retriever/embedding spans underneath it, and `LLM` `ChatCompletion` spans carrying the actual prompt, completion, model name, and token counts. The relevance grader is a direct LLM call rather than a CrewAI agent (see ADR-9 in `doc/design-decisions.md`), so it produces an `LLM` span like every other completion, but it never produces an `AGENT` span; no "Grader" agent span can appear in a trace. A `correlation.id` attribute ties every span in a request back to its `X-Correlation-ID` log lines. Live traces were confirmed to carry a non-zero trace id end to end.
 
-**Prompts.** Prompt text is never hardcoded: every agent prompt lives in `prompts/*.yaml` (git-versioned, the source of truth). On startup, the backend syncs each YAML template into Phoenix's prompt hub, comparing content first so re-running doesn't pile up duplicate versions, then immediately pulls the current version back so that a change made in the Phoenix UI wins over the YAML file for the rest of that process, without a restart. If Phoenix is unreachable, the app falls back to YAML silently. To change a prompt:
+**Prompts.** The five graded/generative prompts (router, rewriter, grader, synthesizer, groundedness checker) are externalized in `prompts/*.yaml` (git-versioned, the source of truth) and managed through Phoenix as described below. What is *not* externalized: each CrewAI agent's `role`/`goal`/`backstory` strings, the Researcher's task description (it has no YAML template at all, unlike the other five stages), and the one-off `direct_answer` chit-chat prompt, all of which remain as plain strings in `backend/app/agents/stages.py`. On startup, the backend syncs each YAML template into Phoenix's prompt hub, comparing content first so re-running doesn't pile up duplicate versions, then immediately pulls the current version back so that a change made in the Phoenix UI wins over the YAML file for the rest of that process, without a restart. If Phoenix is unreachable, the app falls back to YAML silently. To change one of the five YAML-backed prompts:
 
 - **Quick experiment / one-off tweak:** edit it directly in the Phoenix UI (Prompts tab). Takes effect immediately for new requests.
 - **Permanent change:** edit the `.yaml` file in `prompts/`, bump its `version:` field, and commit it. It syncs to Phoenix on the next backend restart.
@@ -167,15 +168,19 @@ Open Phoenix at `http://localhost:6006`.
 
 ## 7. Evaluation
 
-`scripts/evaluate.py` runs the hand-curated golden question set (`evaluation/golden_set.json`) through both pipeline modes via `POST /api/v1/query`, then scores each response with RAGAs (faithfulness, answer relevancy, context precision, context recall), judged by the local `qwen2.5:7b`.
+**Known limitation: agentic mode trades recall for precision.** Run against the real, fully populated corpus, agentic mode answered 15 of 23 answerable golden-set questions and correctly refused both of the 2 unanswerable ones, with zero fabricated answers across all 25 questions. The 8 refusals on answerable questions were all traced to the per-chunk relevance grader rejecting every retrieved chunk before synthesis ever ran, not to a retrieval failure. Simple mode, which skips grading entirely, answered every question it was tried against in the same evaluation. See `doc/evaluation-report.md` for the full breakdown and ADR-12 in `doc/design-decisions.md` for why a fail-open fix for the grader was tried and reverted (it fixed refusals but introduced a fabricated answer on an unanswerable question). If you are demoing this and want reliably answered questions, start with simple mode; use agentic mode to show the corrective-RAG behavior itself.
+
+`scripts/evaluate.py` runs the hand-curated golden question set (`evaluation/golden_set.json`) through both pipeline modes via `POST /api/v1/query`, then scores each response with RAGAs (faithfulness, answer relevancy, context precision, context recall), judged by a local model. The script's `--judge-model` defaults to `DOCUMIND_JUDGE_MODEL` (`qwen2.5:7b`); the recorded run in `doc/evaluation-report.md` substituted the smaller `qwen2.5:3b` to fit a CPU time budget, and that substitution is disclosed in the report itself.
+
+`ragas` and `langchain-ollama` are in the non-default `eval` uv dependency group, so `--group eval` is required or the script fails with `ModuleNotFoundError`:
 
 ```bash
-uv run --project backend python scripts/evaluate.py \
+uv run --project backend --group eval python scripts/evaluate.py \
   --api-key <your-key> \
   --modes simple agentic
 ```
 
-Add `--limit N` or `--indices 1,4,9,...` to bound wall-clock time on a slow CPU judge; the full golden set stays committed regardless of what a given run evaluates. Results and a written report land in `evaluation/runs/<timestamp>/results.json` (gitignored, per-question detail) and `doc/evaluation-report.md` (committed, may be produced/updated as a separate step from the rest of this documentation set).
+Add `--limit N` or `--indices 1,4,9,...` to bound wall-clock time on a slow CPU judge; the full golden set stays committed regardless of what a given run evaluates. Results and a written report land in `evaluation/runs/<timestamp>/results.json` (gitignored, per-question detail) and `doc/evaluation-report.md` (committed).
 
 **Judge caveat:** the judge is a 7B model running on CPU, not a frontier model. Absolute scores are noisy; treat them directionally. Because both pipeline modes are scored by the same judge, its bias mostly cancels out of the agentic-vs-naive *comparison*, which is the more load-bearing number here than any single absolute score.
 
@@ -242,4 +247,5 @@ documind/
 - **[doc/api.md](doc/api.md)**: every endpoint, its method, path, auth, real request/response shapes, and error codes.
 - **[doc/openapi.json](doc/openapi.json)**: the raw OpenAPI 3 schema, exported from the running FastAPI app. Authoritative if it ever disagrees with the hand-written docs.
 - **[doc/design-decisions.md](doc/design-decisions.md)**: ADR-style write-ups of the decisions that shaped this build, including several made mid-implementation once the mandated stack's actual behavior on CPU became clear.
-- **doc/evaluation-report.md**: RAGAs results and the agentic-vs-naive latency/quality comparison. Produced by `scripts/evaluate.py`; may be committed in a separate step from the rest of this documentation set.
+- **doc/evaluation-report.md**: RAGAs results and the agentic-vs-naive latency/quality comparison, produced by `scripts/evaluate.py`.
+- **[doc/presentation/deck.md](doc/presentation/deck.md)**: the Marp slide deck covering the brief, architecture, mandated-tool mapping, ingestion and agentic pipelines, observability, PromptOps, evaluation, and engineering findings; see `doc/presentation/README.md` for how to render it.
