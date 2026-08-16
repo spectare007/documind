@@ -1,4 +1,12 @@
-"""One single-agent CrewAI crew per corrective-RAG stage.
+"""The corrective-RAG stages: one single-agent CrewAI crew per *deciding* stage.
+
+Four roles are CrewAI agents because each one makes a judgment a model has to
+make: Router (retrieve or reply directly), Query Rewriter (what to search
+for), Answer Synthesizer (what the answer is), Groundedness Checker (whether
+the answer is supported). Two stages are plain deterministic code: `research`
+(the queries are already chosen, so every one of them is simply searched) and
+`grade` (a binary classifier that measurably got *worse* inside an agent
+wrapper). Both have docstrings recording why.
 
 Why one crew per stage rather than one multi-agent crew: the pipeline needs
 *programmatic* control over the retry loops (bounded attempts, feedback
@@ -22,7 +30,6 @@ import re
 from crewai import Agent, Crew, Process, Task
 
 from app.agents.llm import get_crew_llm
-from app.agents.tools import DocumentSearchTool
 from app.core.config import get_settings
 from app.observability.prompts import get_prompt_manager
 from app.pipelines.simple import format_context
@@ -35,9 +42,10 @@ logger = logging.getLogger(__name__)
 # come from the versioned prompt templates via `get_prompt_manager()`.
 _BACKSTORY = "You work inside DocuMind, a document search platform."
 
-# A stage agent gets at most this many reasoning/tool iterations before CrewAI
-# forces it to answer. Only the researcher genuinely loops (one tool call per
-# rewritten query, of which there are at most three); the rest answer in one.
+# A stage agent gets at most this many reasoning iterations before CrewAI
+# forces it to answer. Every remaining agent role answers in one, so this is a
+# safety cap against a model that talks itself into a loop, not a budget any
+# stage is expected to spend.
 _MAX_ITER = 3
 
 MAX_REWRITTEN_QUERIES = 3
@@ -162,11 +170,15 @@ def parse_relevance_verdict(text: str) -> bool:
     return True
 
 
-# --- crew stages: one single-agent Crew per pipeline step ---
+# --- crew stages: one single-agent Crew per deciding pipeline step ---
 
 
 class CrewStages:
-    """The six agent roles of the corrective-RAG graph, plus the direct reply.
+    """The six stages of the corrective-RAG graph, plus the direct reply.
+
+    Four are CrewAI agents (`route`, `rewrite`, `synthesize`, `check`, and
+    `direct_answer` on the no-retrieval branch); `research` and `grade` are
+    plain code. See the module docstring.
 
     Constructor arguments exist for tests and for the evaluation harness:
     passing an `llm`/`retriever` avoids touching Ollama or Postgres.
@@ -211,47 +223,33 @@ class CrewStages:
     def research(self, queries: list[str], top_k: int | None = None) -> list[RetrievedChunk]:
         """Search once per query and return the deduplicated chunks.
 
-        The agent's own reply is thrown away -- only the structured chunks it
-        pushed into `buffer` matter. Two safety nets keep this stage from ever
-        returning nothing for a recoverable reason: a crew failure is logged
-        and swallowed, and an agent that never called the tool (small models
-        sometimes just answer from memory) is backstopped by running the
-        retriever directly.
+        Deliberately **not** a CrewAI agent, unlike Router, Rewriter,
+        Synthesizer and Checker. It used to be one, and the agent framing was
+        pure overhead: the stage wrapped an `Agent`+`Task`+`Crew` around a
+        `document_search` tool, then discarded the agent's returned text
+        entirely and read the structured chunks back out of a buffer the tool
+        wrote to. There is no decision left for a model to make at this point
+        -- the Rewriter has already chosen the queries, and every one of them
+        is searched. So the completion bought nothing and cost a full LLM
+        round trip (plus its own failure modes: a small model that answers
+        from memory without calling the tool at all, which needed a direct
+        retrieval fallback, which then needed a usage-count guard to stop it
+        double-retrieving) on a path whose measured median latency is about
+        two minutes. Retrieval and grading are now the two deterministic
+        steps in the graph; the four roles that genuinely make a judgment
+        stay agents.
 
-        `top_k` is the per-request override for `retrieval_top_k` and must
-        reach *both* retrieval paths (the tool and the direct fallback), or
-        the number of chunks a request sees would depend on whether the agent
-        remembered to call its tool.
+        `top_k` is the per-request override for `retrieval_top_k`; `None`
+        keeps the configured default.
         """
-        buffer: list[RetrievedChunk] = []
-        tool = DocumentSearchTool(retriever=self.retriever, buffer=buffer, top_k=top_k)
-        description = (
-            "Use the document_search tool once per query to gather evidence. Queries:\n"
-            + "\n".join(f"- {q}" for q in queries)
-            + "\nAfter searching, reply with a one-line summary of what was found."
-        )
-        try:
-            self._kickoff("Researcher", "Gather relevant document evidence",
-                          description, "one-line summary", tools=[tool])
-        except Exception as exc:
-            logger.warning("researcher crew failed (%s); falling back to direct retrieval", exc)
-        # `current_usage_count` is incremented by CrewAI's `BaseTool.run`
-        # *before* it delegates to `_run`, so 0 means "the tool was never
-        # invoked" and nothing else. Guarding on `not buffer` instead
-        # conflated that with "the agent searched and found nothing", and so
-        # re-ran every query through the retriever a second time on any
-        # empty-result question -- doubling the embedding calls for the most
-        # common failure case. A crew that died before its first tool call
-        # still has count 0, so the crew-failure fallback keeps working.
-        if tool.current_usage_count == 0:
-            logger.info("researcher never called document_search; retrieving directly")
-            for q in queries:
-                buffer.extend(self.retriever.retrieve(q, top_k=top_k))
+        chunks: list[RetrievedChunk] = []
+        for query in queries:
+            chunks.extend(self.retriever.retrieve(query, top_k=top_k))
         # Deduplicate on (doc_id, text): identical text in two different
         # documents is two real citations, and collapsing on text alone
         # silently dropped one of them.
         seen: set[tuple[str, str]] = set()
-        unique = [c for c in buffer
+        unique = [c for c in chunks
                   if not ((c.doc_id, c.text) in seen or seen.add((c.doc_id, c.text)))]
         logger.info("research stage: %d queries -> %d unique chunks", len(queries), len(unique))
         return unique
