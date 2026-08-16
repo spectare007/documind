@@ -37,10 +37,37 @@ Tracing is always best-effort: `setup_tracing()` must never raise, must
 return quickly even when Phoenix is unreachable (span export is async/
 batched, so `register()` does not block on connectivity), and must be safe
 to call more than once (e.g. once per FastAPI app instance created in
-tests) -- a module-level flag makes it a no-op after the first successful
-call. Each instrumentor is attempted independently: a CrewAI-version
+tests). Each instrumentor is attempted independently: a CrewAI-version
 mismatch (or any other single instrumentor failure) must not prevent the
 other instrumentors from being attached.
+
+TWO DIFFERENT LIFETIMES, TWO DIFFERENT GUARDS (fix for a review finding):
+`register()` and the process-wide OpenInference instrumentors (CrewAI,
+LlamaIndex, LiteLLM) really are process-global and correctly run at most
+once -- re-registering a tracer provider or re-patching a third-party
+*library* on every `create_app()` call would be wasteful and, for some
+instrumentors, unsafe. Those stay behind the module-level `_initialized`
+flag, exactly as before. FastAPI/ASGI instrumentation is different: it
+patches a *specific app instance's* `build_middleware_stack`, so gating it
+behind the same process-wide flag means every `create_app()` after the
+first produces a completely untraced app -- no root server span, ever, for
+the lifetime of the process. This bit in practice: `app.main`'s
+module-level `app = create_app()` (needed for `uvicorn app.main:app`)
+consumes the one-shot flag on import, so any *second* `create_app()` in the
+same process -- e.g. every `TestClient(create_app())` fixture in this test
+suite -- silently got a `NonRecordingSpan` (trace_id all zeros) for every
+request, while direct callers of the module-level `app` got a real span.
+`setup_tracing(app)` therefore now instruments the given `app` on *every*
+call, independent of `_initialized`. This is safe to repeat because
+`FastAPIInstrumentor.instrument_app()` carries its own per-app guard
+(`app._is_instrumented_by_opentelemetry`) -- instrumenting the same app
+twice is already a no-op by the library's own design, so the extra
+process-wide flag around this specific step bought nothing and broke every
+second app instance. See `tests/unit/test_tracing.py::
+test_second_create_app_in_same_process_still_gets_a_real_traced_span` for
+the regression test (in-memory exporter, asserts on the exported span's
+actual trace id, not just that instrumentation "succeeded" without an
+exception).
 
 --- Deliberate, documented exception to "no os.environ reads in app code" ---
 
@@ -80,70 +107,106 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _initialized = False
+# Cached by the one-shot process-wide setup below so every later per-app
+# FastAPI instrumentation call (see `setup_tracing`'s per-`app` step) uses
+# the same registered provider instead of falling back to the OTel global
+# default. Stays `None` if `register()` never succeeded (e.g. Phoenix
+# package incompatible) -- FastAPI instrumentation is still attempted in
+# that case, just without an explicit provider.
+_tracer_provider = None
 
 
 def setup_tracing(app: "FastAPI | None" = None) -> None:
     """Set up Phoenix OTLP tracing and auto-instrumentation.
 
-    `app`, when given, is the actual FastAPI instance to instrument for
-    request-level spans (`app.main.create_app()` passes its own `app`
-    argument -- see the module docstring's "CALLER TIMING REQUIREMENT" for
-    why this must happen before `app` is returned, not from inside
-    `lifespan()`). Omitting it (e.g. in tests that only care about the
-    OpenInference instrumentors) skips FastAPI/ASGI instrumentation but
-    still attempts the others -- still idempotent and non-raising either
-    way.
+    Two independent steps, two independent guards -- see the module
+    docstring's "TWO DIFFERENT LIFETIMES" section for the full rationale:
+
+    1. Process-wide setup (tracer-provider `register()` plus the CrewAI/
+       LlamaIndex/LiteLLM OpenInference instrumentors): runs at most once
+       per process, guarded by the module-level `_initialized` flag.
+    2. Per-app FastAPI/ASGI instrumentation: runs on *every* call that
+       passes an `app`, regardless of `_initialized`, because it patches
+       that specific app instance's `build_middleware_stack`
+       (`app.main.create_app()` passes its own `app` -- see the module
+       docstring's "CALLER TIMING REQUIREMENT" for why this must happen
+       before `app` is returned, not from inside `lifespan()`). Safe to
+       repeat: `FastAPIInstrumentor.instrument_app()` no-ops on an app it
+       has already instrumented.
+
+    Omitting `app` (e.g. in tests that only care about the OpenInference
+    instrumentors) skips step 2 but still attempts step 1. Both steps are
+    best-effort and never raise.
     """
-    global _initialized
-    if _initialized:
-        return
-    try:
-        from phoenix.otel import register
-
-        tracer_provider = register(
-            project_name="documind",
-            endpoint=f"{get_settings().phoenix_base_url}/v1/traces",
-            batch=True,
-            set_global_tracer_provider=True,
-            verbose=False,
-        )
-    except Exception as exc:
-        logger.warning("phoenix tracing setup skipped: %s", exc)
-        return
-
-    env_before = set(os.environ)
-    succeeded, failed = [], []
-    for name, instrument in _instrumentors(app):
+    global _initialized, _tracer_provider
+    if not _initialized:
         try:
-            instrument(tracer_provider)
-            succeeded.append(name)
+            from phoenix.otel import register
+
+            _tracer_provider = register(
+                project_name="documind",
+                endpoint=f"{get_settings().phoenix_base_url}/v1/traces",
+                batch=True,
+                set_global_tracer_provider=True,
+                verbose=False,
+            )
         except Exception as exc:
-            failed.append(name)
-            logger.warning("openinference instrumentor %s failed: %s", name, exc)
-    _scrub_env_pollution(env_before)
+            # Deliberately does NOT set `_initialized = True` here (matches
+            # pre-existing behavior): if Phoenix/the SDK is unreachable or
+            # incompatible now but recovers later, the next `setup_tracing()`
+            # call in this process retries process-wide setup from scratch.
+            logger.warning("phoenix tracing setup skipped: %s", exc)
+            _tracer_provider = None
+        else:
+            env_before = set(os.environ)
+            succeeded, failed = [], []
+            for name, instrument in _process_wide_instrumentors():
+                try:
+                    instrument(_tracer_provider)
+                    succeeded.append(name)
+                except Exception as exc:
+                    failed.append(name)
+                    logger.warning("openinference instrumentor %s failed: %s", name, exc)
+            _scrub_env_pollution(env_before)
+            _initialized = True
+            logger.info(
+                "phoenix tracing initialized (project=documind); instrumentors ok=%s failed=%s",
+                succeeded,
+                failed,
+            )
 
-    _initialized = True
-    logger.info(
-        "phoenix tracing initialized (project=documind); instrumentors ok=%s failed=%s",
-        succeeded,
-        failed,
-    )
+    if app is not None:
+        _instrument_fastapi_app(app, _tracer_provider)
 
 
-def _instrumentors(app: "FastAPI | None"):
-    """Yield (name, instrument_fn) pairs, each importing its own instrumentor.
+def _instrument_fastapi_app(app: "FastAPI", tracer_provider) -> None:
+    """Instrument one FastAPI app instance for request-level server spans.
 
-    Imports happen lazily and per-instrumentor so that one package being
-    absent or incompatible with the installed FastAPI/CrewAI/LlamaIndex
-    version can't prevent the others from being attempted.
+    Deliberately outside the process-wide `_initialized` guard (see
+    `setup_tracing`'s docstring) -- called on every `setup_tracing(app)`
+    invocation. `FastAPIInstrumentor.instrument_app` carries its own
+    per-app `_is_instrumented_by_opentelemetry` guard, so calling this
+    again for an app already instrumented is already a safe no-op; the
+    outer try/except here only guards against a genuinely failed/absent
+    instrumentor package, consistent with "tracing must never raise".
     """
-
-    def _fastapi(tracer_provider):
-        if app is None:
-            raise RuntimeError("setup_tracing() called without an app; skipping FastAPI instrumentation")
+    try:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
         FastAPIInstrumentor.instrument_app(app, tracer_provider=tracer_provider)
+    except Exception as exc:
+        logger.warning("fastapi instrumentation failed for this app: %s", exc)
+
+
+def _process_wide_instrumentors():
+    """Yield (name, instrument_fn) pairs for the one-shot, process-wide
+    OpenInference instrumentors (everything except FastAPI/ASGI, which is
+    per-app -- see `_instrument_fastapi_app`).
+
+    Imports happen lazily and per-instrumentor so that one package being
+    absent or incompatible with the installed CrewAI/LlamaIndex/LiteLLM
+    version can't prevent the others from being attempted.
+    """
 
     def _crewai(tracer_provider):
         from openinference.instrumentation.crewai import CrewAIInstrumentor
@@ -161,7 +224,6 @@ def _instrumentors(app: "FastAPI | None"):
         LiteLLMInstrumentor().instrument(tracer_provider=tracer_provider)
 
     return [
-        ("fastapi", _fastapi),
         ("crewai", _crewai),
         ("llama_index", _llama_index),
         ("litellm", _litellm),

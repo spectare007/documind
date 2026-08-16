@@ -18,6 +18,14 @@ def test_retrieve_maps_nodes_and_dedupes():
     chunks = HybridRetriever(index=index).retrieve("q", top_k=5)
     assert [c.text for c in chunks] == ["alpha", "beta"]
     assert chunks[0].score == 0.9 and chunks[1].title == "Doc2"
+    # Regression guard (review Minor finding): pin the actual query-mode
+    # kwarg passed to `as_retriever`, not just its output -- a silent
+    # regression to dense-only retrieval would otherwise still pass this
+    # test, even though hybrid search is a headline feature.
+    _, kwargs = index.as_retriever.call_args
+    assert kwargs["vector_store_query_mode"] == "hybrid"
+    assert kwargs["similarity_top_k"] == 5
+    assert kwargs["sparse_top_k"] == 5
 
 
 def test_build_citations_unique():

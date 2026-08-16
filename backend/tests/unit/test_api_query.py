@@ -1,6 +1,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -46,3 +47,54 @@ def test_query_simple_mode(client):
 def test_query_validates_empty_question(client):
     r = client.post("/api/v1/query", headers=AUTH, json={"question": "  "})
     assert r.status_code == 422
+
+
+def test_query_llm_connection_timeout_yields_503_not_500(client):
+    """Regression test for a review finding: an unwrapped LLM connectivity
+    failure used to propagate as FastAPI's generic unhandled 500 (no
+    structured body, no route-level log). `SimplePipeline`'s LLM
+    (`llama_index.llms.ollama.Ollama`) calls Ollama via `httpx` directly and
+    lets connect/read timeouts and connection failures surface as raw
+    `httpx.TransportError` subclasses -- confirmed empirically against the
+    installed client, not assumed. See `app/api/query.py`'s module
+    docstring for the full verification.
+    """
+    with patch("app.api.query.get_pipeline") as gp:
+        gp.return_value.answer = MagicMock(
+            side_effect=httpx.ConnectTimeout("timed out")
+        )
+        r = client.post("/api/v1/query", headers=AUTH,
+                        json={"question": "meaning of life?", "mode": "simple"})
+    assert r.status_code == 503
+    body = r.json()
+    assert "ollama" in body["detail"].lower()
+
+
+def test_query_llm_connection_error_yields_503_not_500(client):
+    """Same regression, for the other LLM client this app constructs:
+    `AgenticPipeline`'s `crewai.LLM` re-raises both connection-refused and
+    timeout failures as a plain builtin `ConnectionError` (confirmed
+    empirically -- CrewAI catches the underlying `openai.APIConnectionError`/
+    `APITimeoutError` and wraps it). Must not be swallowed as a bare
+    `except Exception` -- it's specifically caught alongside the httpx
+    family in `app.api.query.LLM_UNAVAILABLE_ERRORS`.
+    """
+    with patch("app.api.query.get_pipeline") as gp:
+        gp.return_value.answer = MagicMock(
+            side_effect=ConnectionError("Failed to connect to OpenAI API: Connection error.")
+        )
+        r = client.post("/api/v1/query", headers=AUTH,
+                        json={"question": "meaning of life?", "mode": "agentic"})
+    assert r.status_code == 503
+    body = r.json()
+    assert "ollama" in body["detail"].lower()
+
+
+def test_query_programming_error_still_yields_500():
+    """A bare `except Exception` around the pipeline call would also swallow
+    real bugs (e.g. a `KeyError` in prompt formatting) and misreport them as
+    "upstream unavailable". `LLM_UNAVAILABLE_ERRORS` must not catch this.
+    """
+    from app.api import query as query_module
+    assert not issubclass(KeyError, query_module.LLM_UNAVAILABLE_ERRORS)
+    assert not issubclass(ValueError, query_module.LLM_UNAVAILABLE_ERRORS)
