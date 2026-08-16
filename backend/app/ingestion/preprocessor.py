@@ -1,9 +1,11 @@
 import logging
+import threading
 from pathlib import Path
 
 from docling.chunking import HybridChunker
 from docling.document_converter import DocumentConverter
 from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer
+from docling_core.types.doc.document import TableItem
 
 from app.ingestion.types import ParsedDocument, RawChunk
 
@@ -11,19 +13,31 @@ logger = logging.getLogger(__name__)
 
 _converter: DocumentConverter | None = None
 
+# Guards both the lazy construction of the shared DocumentConverter and every convert()
+# call made through it. DocumentConverter.convert() is not documented thread-safe, and
+# ingestion jobs (Task 6) each run on their own thread, so PDF conversion is fully
+# serialised here: a single shared converter used one document at a time is the right
+# trade for this project, since correctness matters far more than ingestion throughput.
+# Re-entrant so parse_pdf() can hold the lock across both the lazy-init check and the
+# convert() call without deadlocking against _get_converter()'s own locking.
+_converter_lock = threading.RLock()
+
 # docling 2.120.x default tokenizer for HybridChunker when none is supplied.
 _DEFAULT_TOKENIZER_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 
 def _get_converter() -> DocumentConverter:
     global _converter
-    if _converter is None:  # heavyweight: loads layout models on first use
-        _converter = DocumentConverter()
+    if _converter is None:  # fast path: avoid locking once warmed up
+        with _converter_lock:
+            if _converter is None:  # re-check inside the lock (double-checked locking)
+                _converter = DocumentConverter()  # heavyweight: loads layout models on first use
     return _converter
 
 
 def parse_pdf(path: Path, max_tokens: int = 512) -> ParsedDocument:
-    result = _get_converter().convert(str(path))
+    with _converter_lock:  # serialise conversion; see _converter_lock comment above
+        result = _get_converter().convert(str(path))
     doc = result.document
     title = (doc.name or path.stem).strip() or path.stem
     tokenizer = HuggingFaceTokenizer.from_pretrained(
@@ -38,7 +52,7 @@ def parse_pdf(path: Path, max_tokens: int = 512) -> ParsedDocument:
         pages: set[int] = set()
         is_table = False
         for item in getattr(meta, "doc_items", None) or []:
-            if type(item).__name__ == "TableItem":
+            if isinstance(item, TableItem):
                 is_table = True
             for prov in getattr(item, "prov", None) or []:
                 page_no = getattr(prov, "page_no", None)
