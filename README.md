@@ -243,6 +243,7 @@ documind/
 
 ## 9. Documentation index
 
+- **[doc/project-brief.md](doc/project-brief.md)**: the presenting reference. What was asked and what was built (including a mandated-tool to file-path map), every significant decision with its alternatives and its cost, the failure investigations behind them, the measured results and their caveats, known limitations with concrete next steps, anticipated review questions, and a demo script.
 - **[doc/architecture.md](doc/architecture.md)**: system context, ingestion flow, the agentic pipeline's state machine and its bounded correction loops, and the Postgres data model, all as Mermaid diagrams reflecting the implemented code.
 - **[doc/api.md](doc/api.md)**: every endpoint, its method, path, auth, real request/response shapes, and error codes.
 - **[doc/openapi.json](doc/openapi.json)**: the raw OpenAPI 3 schema, exported from the running FastAPI app. Authoritative if it ever disagrees with the hand-written docs.
