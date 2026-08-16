@@ -71,7 +71,7 @@ One FastAPI service, one Postgres instance (vectors + full-text + ledger), one O
 | Docling | `backend/app/ingestion/pipeline.py`, `preprocessor.py`: `DocumentConverter`, `HybridChunker` |
 | PGVector | `postgres` service (`pgvector/pgvector:pg16`); `backend/app/retrieval/vector_store.py` |
 | LlamaIndex | `backend/app/retrieval/retriever.py`, `vector_store.py`: hybrid retriever |
-| CrewAI | `backend/app/agents/stages.py`, `tools.py`, `llm.py`: five CrewAI agent roles plus one direct-call grading stage (ADR-9) |
+| CrewAI | `backend/app/agents/stages.py`, `tools.py`, `llm.py`: five CrewAI agent roles plus one direct-call grading stage |
 | Ollama | `ollama` service in `docker-compose.yml`; `qwen2.5:3b`, `nomic-embed-text`, `qwen2.5:7b` |
 | Phoenix | `backend/app/observability/tracing.py`, `prompts.py`; `phoenix` service |
 | RAGAs | `scripts/evaluate.py`, `evaluation/golden_set.json` |
@@ -130,7 +130,7 @@ Five CrewAI agent roles, one crew (single agent, single task) per stage, orchest
 | Router | CrewAI agent, LLM call |
 | Query Rewriter | CrewAI agent, LLM call |
 | Researcher | CrewAI agent, **tool execution** (`document_search` → LlamaIndex hybrid retriever) |
-| Relevance Grader | **direct LLM call, no CrewAI agent** -- one binary call per chunk (see ADR-9: wrapping this in a CrewAI `Agent` was measured to invert the model's judgment) |
+| Relevance Grader | **direct LLM call, no CrewAI agent** -- one binary call per chunk (wrapping this in a CrewAI `Agent` was measured to invert the model's judgment) |
 | Answer Synthesizer | CrewAI agent, LLM call |
 | Groundedness Checker | CrewAI agent, LLM call |
 
@@ -167,7 +167,7 @@ CHAIN  crew kickoff (per stage)
     LLM    ChatCompletion (prompt, completion, model, token counts)
 ```
 
-The Relevance Grader is a direct LLM call, not a CrewAI agent (ADR-9), so it produces an `LLM` span but no `AGENT` span -- there is no "Grader" agent span in any trace.
+The Relevance Grader is a direct LLM call, not a CrewAI agent, so it produces an `LLM` span but no `AGENT` span -- there is no "Grader" agent span in any trace.
 
 - One real agentic HTTP query produced **7 LLM spans**, **~1847 prompt + 240 completion tokens**.
 - A `correlation.id` on every span ties it back to the request's log lines (`X-Correlation-ID`).
@@ -216,7 +216,7 @@ Runtime prompt used by the crew
 - Agentic mode answered 15 of 23 answerable questions and correctly refused both of the 2 unanswerable ones, with **zero fabricated answers** across all 25.
 - The 8 refusals on answerable questions were all traced to the per-chunk relevance grader rejecting every retrieved chunk before synthesis ran, not to a retrieval failure (confirmed by re-running 4 of them in simple mode, which answered all 4 correctly from the same index).
 - Latency: min 60s, median 125s, mean 132s, max 258s over the 25 questions.
-- See ADR-12 in `doc/design-decisions.md` for a fail-open grader fix that was tried, found to fix 8 refusals but fabricate an answer on an unanswerable question, and reverted.
+- A fail-open grader fix (proceed to synthesis on the top-ranked chunks when the grader rejected all of them) was tried, found to fix those 8 refusals but fabricate an answer on an unanswerable question, and reverted.
 
 ---
 
@@ -224,7 +224,7 @@ Runtime prompt used by the crew
 
 The most interesting failures this build actually surfaced:
 
-- **A 3B model returning `[]` for every grader call, and a second, deeper bug hiding behind the first fix.** A single call asking for a JSON array of relevant chunk indices got an empty array back for every input (relevant, irrelevant, or none) once CrewAI's own `expected_output` boilerplate was appended. Rewording to one yes/no verdict per chunk looked like the fix in an initial live check, but that check ran the question as a bare completion, not through the actual code path; once the real `CrewStages.grade()` used the same CrewAI `Agent`/`Task` wrapper as every other stage, it answered "no" for essentially everything regardless of chunk content. Isolating variables live showed the CrewAI agent's own system message, not the wording, flipped the model negative (confirmed with a control question, "Is grass green?"). The real fix (see ADR-9 in `doc/design-decisions.md`) removes the CrewAI wrapper for this one stage entirely: a direct `self.llm.call(...)` completion, verified live to discriminate correctly on real chunks.
+- **A 3B model returning `[]` for every grader call, and a second, deeper bug hiding behind the first fix.** A single call asking for a JSON array of relevant chunk indices got an empty array back for every input (relevant, irrelevant, or none) once CrewAI's own `expected_output` boilerplate was appended. Rewording to one yes/no verdict per chunk looked like the fix in an initial live check, but that check ran the question as a bare completion, not through the actual code path; once the real `CrewStages.grade()` used the same CrewAI `Agent`/`Task` wrapper as every other stage, it answered "no" for essentially everything regardless of chunk content. Isolating variables live showed the CrewAI agent's own system message, not the wording, flipped the model negative (confirmed with a control question, "Is grass green?"). The real fix removes the CrewAI wrapper for this one stage entirely: a direct `self.llm.call(...)` completion, verified live to discriminate correctly on real chunks.
 - **CrewAI's module-level `load_dotenv()`.** Simply `import crewai` loaded the repo's `.env` into `os.environ` and silently overrode `get_settings()` process-wide, breaking auth tests.
 - **A pydantic v2 field rebuild broke a shared buffer.** Pydantic v2 rebuilds list-typed fields, so the agent tool's result buffer became a *different* list object: every tool result was discarded and retrieval silently ran twice per call.
 - **Docling needed TorchDynamo disabled.** The slim base image has no C++ toolchain; Docling's model path invokes `torch.compile`, which failed every ingestion until `TORCHDYNAMO_DISABLE=1` was set (compilation buys nothing on CPU-only anyway).
@@ -235,7 +235,7 @@ The most interesting failures this build actually surfaced:
 
 - **CPU-only latency.** Measured against the real corpus over 25 questions: simple mode 25 to 82s, agentic mode 60 to 258s (median 125s, mean 132s). This is the assessment's own constraint, not a config miss: the user explicitly chose agentic depth over speed.
 - **The judge is a small local model, not a frontier one.** `qwen2.5:7b` on CPU makes RAGAs scores directionally useful, not precise. Same judge scores both pipelines, so the comparison is more trustworthy than any single absolute score.
-- **The per-chunk grader is measurably over-selective.** Across the full 25-question sweep against the real corpus, the grader rejected every retrieved chunk on 8 of 23 answerable questions, driving agentic mode's recall well below simple mode's (`doc/evaluation-report.md`). A fail-open fallback around the grader was tried (ADR-12) and fixed those refusals, but it also caused a fabricated answer on a genuinely unanswerable question, so it was reverted; the grader's recall gap remains open, with a larger judge model (`qwen2.5:7b`) identified as the next thing to try.
+- **The per-chunk grader is measurably over-selective.** Across the full 25-question sweep against the real corpus, the grader rejected every retrieved chunk on 8 of 23 answerable questions, driving agentic mode's recall well below simple mode's (`doc/evaluation-report.md`). A fail-open fallback around the grader was tried and fixed those refusals, but it also caused a fabricated answer on a genuinely unanswerable question, so it was reverted; the grader's recall gap remains open, with a larger judge model (`qwen2.5:7b`) identified as the next thing to try.
 
 ---
 

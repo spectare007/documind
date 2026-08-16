@@ -61,7 +61,7 @@ def test_parse_relevance_verdict():
 
 
 def test_parse_relevance_verdict_does_not_repeat_the_nested_substring_bug():
-    """ADR-9's near miss: an earlier grader asked for RELEVANT/IRRELEVANT and
+    """Regression test for a real near miss in the grader's history: an earlier grader asked for RELEVANT/IRRELEVANT and
     reused `parse_verdict`'s "no"-prefix check against that vocabulary.
     "IRRELEVANT" does not start with "no", so every chunk was silently kept
     regardless of the model's actual verdict -- a rubber-stamp grader

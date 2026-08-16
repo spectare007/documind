@@ -8,7 +8,7 @@ This report has two parts. Part 1 is the current, primary result: all 25 golden-
 
 ## Part 1: Full 25-question agentic sweep (current, primary result)
 
-**Method**: all 25 questions in `evaluation/golden_set.json` were sent to `POST /api/v1/query` with `mode=agentic` against the real corpus, on the current build (after the ADR-12 fail-open fallback was reverted, i.e. the grader behaves as shipped). Each row recorded the question, category, answer, number of retrieved chunks, citations, a groundedness flag, latency, and a trace ID.
+**Method**: all 25 questions in `evaluation/golden_set.json` were sent to `POST /api/v1/query` with `mode=agentic` against the real corpus, on the current build (after a fail-open fallback around the grader, tried and reverted after it caused a fabrication, was removed, i.e. the grader behaves as shipped). Each row recorded the question, category, answer, number of retrieved chunks, citations, a groundedness flag, latency, and a trace ID.
 
 ### Headline
 
@@ -89,7 +89,7 @@ Four of the eight refused questions above were re-run in `simple` mode, which sh
 | Payslip: designation | Correct | 10 | 82 |
 | Payslip: payment mode | Correct | 11 | 60 |
 
-Since both modes read from the same retrieval index, a question that `simple` mode answers correctly and `agentic` mode refuses cannot be a retrieval problem: the relevant chunks are present and rankable. The difference has to be downstream of retrieval, in the per-chunk relevance grading stage that only `agentic` mode runs. This matches ADR-9 and ADR-12 in `doc/design-decisions.md`: the `qwen2.5:3b` grader is known to be fragile on this exact classification task, and a previously-tried fail-open fallback around the grader was reverted after it caused a fabricated answer on an unanswerable question (see Part 2's judge-reliability note and ADR-12 for the full account).
+Since both modes read from the same retrieval index, a question that `simple` mode answers correctly and `agentic` mode refuses cannot be a retrieval problem: the relevant chunks are present and rankable. The difference has to be downstream of retrieval, in the per-chunk relevance grading stage that only `agentic` mode runs. The `qwen2.5:3b` grader is known to be fragile on this exact classification task (see `doc/architecture.md` for the CrewAI-agent-wrapper failure mode that causes it). A previously tried fail-open fallback around the grader, which proceeded to synthesis on the top-ranked chunks whenever the grader rejected all of them, fixed these refusals but was reverted after it caused the synthesizer to fabricate a bonus figure by misattributing an unrelated payslip table row (see Part 2's judge-reliability note for related detail).
 
 ### Analysis: precision vs. recall trade-off, and the concrete next step
 
@@ -97,13 +97,13 @@ Based on this sweep, `agentic` mode is currently precision-oriented: it would ra
 
 `simple` mode looks recall-oriented by comparison: the 5-question RAGAs run in Part 2 and the 4-question cross-mode diagnostic above are the only direct measurements available, and in both, `simple` mode answered every question it was given correctly, at latencies of 25 to 82 seconds in the diagnostic (versus 27 to 43 seconds mean/p95 in the RAGAs run). No full 25-question sweep of `simple` mode exists yet, so "answers essentially everything" is a claim scoped to the 5 RAGAs questions plus these 4 diagnostic questions (9 data points total, not 25), not an extrapolation to the full set.
 
-The concrete next step, already identified in ADR-12 and not yet attempted: run the per-chunk grading stage on a larger model, `qwen2.5:7b`, which is already pulled locally and already used as the RAGAs judge, instead of the `qwen2.5:3b` used for the other agent roles. ADR-9 already found this exact 3B model's grading judgment to be fragile to wrapper and prompt framing, which is the most likely explanation for the refusals here. The same 25 golden questions should be re-run in `agentic` mode with only the grading stage swapped to the larger model, so the comparison isolates that one change.
+The concrete next step, not yet attempted: run the per-chunk grading stage on a larger model, `qwen2.5:7b`, which is already pulled locally and already used as the RAGAs judge, instead of the `qwen2.5:3b` used for the other agent roles. This exact 3B model's grading judgment is already known to be fragile to wrapper and prompt framing (see `doc/architecture.md`), which is the most likely explanation for the refusals here. The same 25 golden questions should be re-run in `agentic` mode with only the grading stage swapped to the larger model, so the comparison isolates that one change.
 
 ---
 
 ## Part 2: RAGAs metric run (5-question subset, historical)
 
-> **This section's agentic figures were recorded while a grader defect was active** (the same defect documented in ADR-9's addendum in `doc/design-decisions.md`, where the per-chunk grader was effectively rubber-stamping or rejecting chunks regardless of content). The `answer_relevancy` and `context_precision` scores of 0.0 for agentic mode below reflect that defect, not agentic mode's current behavior. For agentic mode's current, defect-free performance, see Part 1 above, which reports the full 25-question sweep run against the current build.
+> **This section's agentic figures were recorded while a grader defect was active** (the same defect described in `doc/architecture.md`: a CrewAI agent wrapper's injected system message biased the per-chunk grader into effectively rubber-stamping or rejecting chunks regardless of their actual content). The `answer_relevancy` and `context_precision` scores of 0.0 for agentic mode below reflect that defect, not agentic mode's current behavior. For agentic mode's current, defect-free performance, see Part 1 above, which reports the full 25-question sweep run against the current build.
 
 Judge: local Ollama `qwen2.5:3b` (embeddings: `nomic-embed-text`) · Metrics: RAGAs
 
@@ -158,4 +158,4 @@ This is the mechanism behind the headline numbers, not just a side note: when a 
 - Agentic vs simple comparison shares the same judge, so relative differences are more reliable.
 - Unanswerable questions score via faithfulness (refusing is grounded behavior) -- but see the Key Finding above: a refusal-driven faithfulness score is not evidence of answer quality.
 - One or more metrics returned NaN for some rows (local judge failed to parse a verdict). NaNs are excluded from the displayed mean and called out per-cell above rather than silently dropped; per-row detail is in the gitignored `evaluation/runs/<timestamp>/results.json`.
-- **This 5-question run's agentic scores were taken while the grading-stage defect described in ADR-9's addendum was active.** They are retained here for the RAGAs metric detail (NaN handling, the judge-reliability anomaly) but should not be read as agentic mode's current performance; see Part 1 for the current 25-question sweep.
+- **This 5-question run's agentic scores were taken while the grading-stage defect described at the top of this section was active.** They are retained here for the RAGAs metric detail (NaN handling, the judge-reliability anomaly) but should not be read as agentic mode's current performance; see Part 1 for the current 25-question sweep.

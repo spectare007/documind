@@ -36,3 +36,7 @@ evaluation/runs/
 # Internal working notes (specs/plans/session state), not project deliverables
 docs/
 .superpowers/
+
+# Internal-only docs (kept locally, not published)
+doc/design-decisions.md
+doc/project-brief.md

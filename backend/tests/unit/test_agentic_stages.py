@@ -169,7 +169,7 @@ def _stages_for_grade(llm_outputs=None, llm_side_effect=None):
 
     `grade()` is the one stage that calls `self.llm.call(...)` directly
     instead of going through `_kickoff()`'s Agent/Task/Crew wrapping (see
-    `grade()`'s docstring and ADR-9 for why) -- so its tests mock the LLM
+    `grade()`'s docstring for why) -- so its tests mock the LLM
     directly rather than `_kickoff`, and record the rendered prompts via
     `call_args_list` instead of the `_kickoff`-call `calls` list the other
     stage tests use.

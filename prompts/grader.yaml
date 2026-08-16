@@ -4,8 +4,7 @@ description: >
   Grade a single retrieved chunk for relevance to the question (binary
   verdict). This is now called as a *direct* LLM completion by
   `CrewStages.grade()`, not through a CrewAI Agent/Task like the other
-  stages -- see that method's docstring and ADR-9 in
-  `doc/design-decisions.md` for why: measured live, the same yes/no question
+  stages -- see that method's docstring for why: measured live, the same yes/no question
   answered "no" for essentially every chunk regardless of content once
   wrapped in CrewAI's Agent/Task scaffolding (which injects its own system
   message and an expected-output footer around this template), confirmed

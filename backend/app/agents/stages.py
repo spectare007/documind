@@ -137,7 +137,7 @@ def parse_relevance_verdict(text: str) -> bool:
     (kept), same fail-open philosophy as every parser in this module.
 
     Deliberately its own function rather than a reuse of `parse_verdict`.
-    An earlier iteration (see `grade()`'s docstring and ADR-9) asked the
+    An earlier iteration (see `grade()`'s docstring) asked the
     grader for RELEVANT/IRRELEVANT instead of yes/no, to dodge a CrewAI
     agent-framing bug, and reused `parse_verdict`'s "does the reply start
     with an explicit no" check against that vocabulary. That was silently
@@ -289,8 +289,9 @@ class CrewStages:
            delegation and no multi-step reasoning, so an agent framing was
            never buying anything here; the other five roles keep using
            `_kickoff()` and the multi-agent architecture is otherwise
-           unchanged. See ADR-9 in `doc/design-decisions.md` for the full
-           record, deliberately including the near-miss.
+           unchanged. This docstring is the full record, deliberately
+           including the near-miss, so the failure mode isn't lost to a
+           future refactor.
 
         Bounded on purpose: at most `retrieval_top_k` chunks are graded,
         highest-scoring first, so a broad retrieval cannot turn one request
