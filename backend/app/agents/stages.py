@@ -208,7 +208,7 @@ class CrewStages:
         )
         return parse_queries(out, fallback=question)
 
-    def research(self, queries: list[str]) -> list[RetrievedChunk]:
+    def research(self, queries: list[str], top_k: int | None = None) -> list[RetrievedChunk]:
         """Search once per query and return the deduplicated chunks.
 
         The agent's own reply is thrown away -- only the structured chunks it
@@ -217,9 +217,14 @@ class CrewStages:
         and swallowed, and an agent that never called the tool (small models
         sometimes just answer from memory) is backstopped by running the
         retriever directly.
+
+        `top_k` is the per-request override for `retrieval_top_k` and must
+        reach *both* retrieval paths (the tool and the direct fallback), or
+        the number of chunks a request sees would depend on whether the agent
+        remembered to call its tool.
         """
         buffer: list[RetrievedChunk] = []
-        tool = DocumentSearchTool(retriever=self.retriever, buffer=buffer)
+        tool = DocumentSearchTool(retriever=self.retriever, buffer=buffer, top_k=top_k)
         description = (
             "Use the document_search tool once per query to gather evidence. Queries:\n"
             + "\n".join(f"- {q}" for q in queries)
@@ -241,7 +246,7 @@ class CrewStages:
         if tool.current_usage_count == 0:
             logger.info("researcher never called document_search; retrieving directly")
             for q in queries:
-                buffer.extend(self.retriever.retrieve(q))
+                buffer.extend(self.retriever.retrieve(q, top_k=top_k))
         # Deduplicate on (doc_id, text): identical text in two different
         # documents is two real citations, and collapsing on text alone
         # silently dropped one of them.
@@ -251,7 +256,8 @@ class CrewStages:
         logger.info("research stage: %d queries -> %d unique chunks", len(queries), len(unique))
         return unique
 
-    def grade(self, question: str, chunks: list[RetrievedChunk]) -> list[int]:
+    def grade(self, question: str, chunks: list[RetrievedChunk],
+              top_k: int | None = None) -> list[int]:
         """Indices of the chunks worth answering from -- one binary verdict
         per chunk, single-token output, called as a *direct* LLM completion
         rather than through a CrewAI Agent/Task like every other stage.
@@ -293,11 +299,14 @@ class CrewStages:
            including the near-miss, so the failure mode isn't lost to a
            future refactor.
 
-        Bounded on purpose: at most `retrieval_top_k` chunks are graded,
-        highest-scoring first, so a broad retrieval cannot turn one request
-        into a dozen sequential CPU completions. Returned indices always
-        address the *caller's* list, so the signature and semantics are
-        unchanged from the array version.
+        Bounded on purpose: at most `retrieval_top_k` chunks are graded (or
+        `top_k`, the per-request override, when one is given), highest-scoring
+        first, so a broad retrieval cannot turn one request into a dozen
+        sequential CPU completions. The cap follows the same number that
+        bounded retrieval, so asking for more chunks does not leave the extra
+        ones silently ungraded and discarded. Returned indices always address
+        the *caller's* list, so the signature and semantics are unchanged from
+        the array version.
 
         Fails open per chunk via `parse_relevance_verdict`: only an explicit
         "yes" keeps a chunk that the parser can read, and a raised exception
@@ -310,12 +319,12 @@ class CrewStages:
         """
         if not chunks:
             return []
-        limit = self.settings.retrieval_top_k
+        limit = top_k or self.settings.retrieval_top_k
         ranked = sorted(range(len(chunks)), key=lambda i: chunks[i].score, reverse=True)
         graded = ranked[:limit]
         if len(ranked) > limit:
             logger.info(
-                "grading top %d of %d chunks by score (retrieval_top_k=%d)",
+                "grading top %d of %d chunks by score (limit=%d)",
                 len(graded), len(chunks), limit,
             )
 

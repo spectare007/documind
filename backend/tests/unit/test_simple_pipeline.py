@@ -39,6 +39,19 @@ def test_simple_pipeline_answers_with_citations():
     assert "Total: 100" in prompt_sent and "what is the total?" in prompt_sent
 
 
+def test_simple_pipeline_passes_top_k_to_the_retriever():
+    """S6: a per-request `top_k` must actually size retrieval."""
+    from app.pipelines.simple import SimplePipeline
+    retriever = MagicMock(); retriever.retrieve.return_value = []
+    pipeline = SimplePipeline(retriever=retriever, llm=MagicMock())
+
+    pipeline.answer("q", history=[], top_k=11)
+    assert retriever.retrieve.call_args.kwargs["top_k"] == 11
+
+    pipeline.answer("q", history=[])
+    assert retriever.retrieve.call_args.kwargs["top_k"] is None  # settings win
+
+
 def test_simple_pipeline_no_chunks_message():
     from app.pipelines.simple import SimplePipeline
     retriever = MagicMock(); retriever.retrieve.return_value = []

@@ -26,6 +26,25 @@ def test_document_lifecycle(session):
     assert got.ingested_at is not None
 
 
+def test_lookup_by_filename_and_sha_update(session):
+    """Filename is the identity; sha256 is a mutable change signal on it."""
+    from app.db.repository import DocumentRepository
+    repo = DocumentRepository(session)
+    doc = repo.create(filename="a.pdf", sha="old")
+    assert repo.get_by_filename("a.pdf").id == doc.id
+    assert repo.get_by_filename("missing.pdf") is None
+    repo.update_sha(doc.id, "new")
+    assert repo.get(doc.id).sha256 == "new"
+    assert repo.get_by_sha("old") is None
+
+
+def test_update_sha_raises_for_unknown_id(session):
+    from app.db.repository import DocumentRepository, RecordNotFoundError
+    repo = DocumentRepository(session)
+    with pytest.raises(RecordNotFoundError):
+        repo.update_sha("does-not-exist", "abc")
+
+
 def test_mark_failed_records_error(session):
     from app.db.repository import DocumentRepository
     repo = DocumentRepository(session)

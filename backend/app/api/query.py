@@ -30,7 +30,7 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException
 from opentelemetry import trace
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from app.core.config import get_settings
 from app.core.errors import LLM_UNAVAILABLE_ERRORS
@@ -44,8 +44,27 @@ __all__ = ["LLM_UNAVAILABLE_ERRORS", "QueryIn", "QueryOut", "get_pipeline", "que
 
 class QueryIn(BaseModel):
     question: str
-    mode: Literal["agentic", "simple"] | None = None
-    top_k: int | None = None
+    mode: Literal["agentic", "simple"] | None = Field(
+        default=None,
+        description=(
+            "Pipeline to run. Omit to use the server's configured "
+            "DOCUMIND_PIPELINE_MODE (default: simple)."
+        ),
+    )
+    # Bounded because it now reaches the retriever (and, in agentic mode, the
+    # per-chunk grader, which spends one LLM completion per chunk on CPU).
+    # An unbounded value would let one request cost arbitrary work.
+    top_k: int | None = Field(
+        default=None,
+        ge=1,
+        le=50,
+        description=(
+            "Chunks to retrieve per search for this request, overriding "
+            "DOCUMIND_RETRIEVAL_TOP_K. Also caps how many chunks the agentic "
+            "pipeline's relevance grader grades. Omit to use the configured "
+            "default."
+        ),
+    )
 
     @field_validator("question")
     @classmethod
@@ -59,7 +78,21 @@ class QueryOut(BaseModel):
     answer: str
     citations: list[Citation]
     chunks: list[RetrievedChunk]
-    grounded: bool | None
+    # Named `grounded` for backwards compatibility; read it as a groundedness
+    # *signal*, not a verdict. See the field description and doc/api.md.
+    grounded: bool | None = Field(
+        description=(
+            "Weak groundedness signal, not a hallucination guarantee. "
+            "true: a small local yes/no model read the answer against the "
+            "retrieved context and did not object. false: it objected, and "
+            "the answer is returned anyway, flagged. null: no check ran "
+            "(direct non-retrieval reply, no answer produced, or the checker "
+            "itself failed). It is a 3B model's single yes/no over the whole "
+            "context and has been observed to pass an answer that attached a "
+            "real number to the wrong label, so treat true as telemetry and "
+            "never as proof the answer is correct."
+        ),
+    )
     mode: str
     trace_id: str
     latency_ms: int
@@ -81,7 +114,9 @@ def query(body: QueryIn) -> QueryOut:
     mode = body.mode or get_settings().pipeline_mode
     start = time.perf_counter()
     try:
-        result: PipelineResult = get_pipeline(mode).answer(body.question, history=[])
+        result: PipelineResult = get_pipeline(mode).answer(
+            body.question, history=[], top_k=body.top_k
+        )
     except LLM_UNAVAILABLE_ERRORS as exc:
         logger.error(
             "query failed: LLM backend unreachable or timed out mode=%s: %s",
@@ -98,8 +133,8 @@ def query(body: QueryIn) -> QueryOut:
     ctx = trace.get_current_span().get_span_context()
     trace_id = format(ctx.trace_id, "032x") if ctx.trace_id else ""
     logger.info(
-        "query answered mode=%s latency_ms=%d chunks=%d trace_id=%s",
-        mode, latency_ms, len(result.chunks), trace_id,
+        "query answered mode=%s top_k=%s latency_ms=%d chunks=%d grounded=%s trace_id=%s",
+        mode, body.top_k, latency_ms, len(result.chunks), result.grounded, trace_id,
     )
     return QueryOut(
         answer=result.answer,

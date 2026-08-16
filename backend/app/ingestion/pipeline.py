@@ -75,26 +75,50 @@ class IngestionPipeline:
             s.commit()
 
     def _already_ingested(self, path: Path) -> bool:
+        """True only if this filename is already `completed` at these exact bytes.
+
+        The hash is the change signal, not the identity: a row that exists for
+        this filename but records a different hash means the file was edited on
+        disk and has to be re-ingested into that same row.
+        """
         sha = _sha256(path)
         with self.session_factory() as s:
-            existing = DocumentRepository(s).get_by_sha(sha)
-            return existing is not None and existing.status == "completed"
+            existing = DocumentRepository(s).get_by_filename(path.name)
+            return (
+                existing is not None
+                and existing.status == "completed"
+                and existing.sha256 == sha
+            )
 
-    def _mark_failed(self, path: Path, error: str) -> None:
-        sha = _sha256(path)
+    def _ledger_row(self, path: Path, sha: str) -> str:
+        """Return the stable `doc_id` for `path`, creating its row if needed.
+
+        Document identity is the filename, so there is exactly one ledger row
+        per file for the life of the corpus and its id survives every
+        re-ingest. A changed file updates `sha256` on that row in place rather
+        than getting a second row, which is what lets `ingest_file` delete the
+        previous version's chunks (they are indexed under this same id).
+        """
         with self.session_factory() as s:
             repo = DocumentRepository(s)
-            doc = repo.get_by_sha(sha) or repo.create(filename=path.name, sha=sha)
-            repo.mark_failed(doc.id, error)
+            doc = repo.get_by_filename(path.name)
+            if doc is None:
+                doc = repo.create(filename=path.name, sha=sha)
+            doc_id = doc.id
+            repo.update_sha(doc_id, sha)
+            s.commit()
+        return doc_id
+
+    def _mark_failed(self, path: Path, error: str) -> None:
+        doc_id = self._ledger_row(path, _sha256(path))
+        with self.session_factory() as s:
+            DocumentRepository(s).mark_failed(doc_id, error)
             s.commit()
 
     def ingest_file(self, path: Path) -> str:
-        sha = _sha256(path)
+        doc_id = self._ledger_row(path, _sha256(path))
         with self.session_factory() as s:
-            repo = DocumentRepository(s)
-            doc = repo.get_by_sha(sha) or repo.create(filename=path.name, sha=sha)
-            doc_id = doc.id
-            repo.mark_processing(doc_id)
+            DocumentRepository(s).mark_processing(doc_id)
             s.commit()
 
         parsed = self.parse(path, max_tokens=self.chunk_max_tokens)
@@ -120,7 +144,10 @@ class IngestionPipeline:
                     },
                 )
             )
-        self.store.delete(ref_doc_id=doc_id)  # re-ingest safety: drop stale chunks
+        # `doc_id` is stable across re-ingests (one ledger row per filename),
+        # so this really does remove the previous version's chunks before the
+        # new ones go in. It is a no-op only on a genuinely first ingest.
+        self.store.delete(ref_doc_id=doc_id)
         self.store.add(nodes)
 
         with self.session_factory() as s:

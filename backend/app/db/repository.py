@@ -22,7 +22,19 @@ class DocumentRepository:
         return self.session.get(DocumentRecord, doc_id)
 
     def get_by_sha(self, sha: str) -> DocumentRecord | None:
+        """Find a row by content hash.
+
+        Not the identity lookup -- `get_by_filename` is (see `DocumentRecord`)
+        -- and not unique, since two files may hold identical bytes. Kept as a
+        content-addressed query for diagnostics and duplicate detection.
+        """
         return self.session.scalar(select(DocumentRecord).where(DocumentRecord.sha256 == sha))
+
+    def get_by_filename(self, filename: str) -> DocumentRecord | None:
+        """Look a document up by its identity (see `DocumentRecord`)."""
+        return self.session.scalar(
+            select(DocumentRecord).where(DocumentRecord.filename == filename)
+        )
 
     def list_all(self) -> list[DocumentRecord]:
         return list(self.session.scalars(select(DocumentRecord).order_by(DocumentRecord.filename)))
@@ -32,6 +44,15 @@ class DocumentRepository:
         if doc is None:
             raise RecordNotFoundError(f"DocumentRecord not found: {doc_id}")
         return doc
+
+    def update_sha(self, doc_id: str, sha: str) -> None:
+        """Record the bytes this row is currently built from.
+
+        Called when a file changed on disk so its existing row is re-pointed
+        at the new content instead of a second row being created for it.
+        """
+        self._require(doc_id).sha256 = sha
+        self.session.flush()
 
     def mark_processing(self, doc_id: str) -> None:
         self._require(doc_id).status = "processing"

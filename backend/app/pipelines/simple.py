@@ -45,10 +45,18 @@ class SimplePipeline:
         question: str,
         history: list[dict],
         on_status: StatusCallback | None = None,
+        top_k: int | None = None,
     ) -> PipelineResult:
+        """Retrieve once, synthesize once.
+
+        `top_k` overrides `retrieval_top_k` for this request only; `None`
+        keeps the configured default. The first three parameters stay
+        positional-compatible with `AgenticPipeline.answer`, which
+        `app.api.openai_compat` calls positionally.
+        """
         notify = on_status or (lambda _msg: None)
         notify("Retrieving documents…")
-        chunks = self.retriever.retrieve(question)
+        chunks = self.retriever.retrieve(question, top_k=top_k)
         if not chunks:
             logger.info("no chunks retrieved for question %r", question[:80])
             return PipelineResult(answer=NO_CONTEXT_ANSWER, retrieval_attempts=1)

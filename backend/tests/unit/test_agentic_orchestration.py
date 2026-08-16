@@ -77,15 +77,21 @@ def test_empty_retrieval_retries_then_gives_up_without_generating():
     assert result.grounded is None
 
 
-def test_failing_check_fails_open_and_keeps_the_answer():
-    """Finding D: the worst outcome is `check()` throwing away an answer we
-    already have. A verifier failure must not cost the user the answer.
+def test_failing_check_keeps_the_answer_but_reports_grounded_none():
+    """Finding D plus B2. Two things have to hold at once:
+
+    * a verifier crash must not throw away an answer already in hand, and
+      must not burn the regeneration attempt as if it were a "no" verdict;
+    * the result must NOT claim `grounded=True`. `True` is supposed to mean
+      "a checker ran and did not object"; reporting it for a check that never
+      ran makes an unchecked answer indistinguishable from a checked one.
     """
     stages = _stages()
     stages.check.side_effect = RuntimeError("verifier blew up")
     result = _pipeline(stages).answer("q", history=[])
     assert result.answer.startswith("answer")
-    assert result.grounded is True          # failed open, same as parse_verdict
+    assert result.grounded is None          # unchecked, not "grounded"
+    assert result.grounded is not True
     assert result.generation_attempts == 1  # not retried as if ungrounded
 
 
@@ -144,6 +150,23 @@ def test_request_budget_returns_the_answer_it_already_has(monkeypatch):
     assert result.answer.startswith("answer")
     assert result.grounded is False
     assert result.citations and result.citations[0].title == "Doc"
+
+
+def test_top_k_reaches_both_retrieval_and_grading():
+    """S6: `top_k` used to be accepted by the API, exported into the schema,
+    and never read. It must reach the stages that actually size retrieval.
+    """
+    stages = _stages()
+    _pipeline(stages).answer("q", history=[], top_k=11)
+    assert stages.research.call_args.args[1] == 11
+    assert stages.grade.call_args.args[2] == 11
+
+
+def test_top_k_defaults_to_none_so_settings_win():
+    stages = _stages()
+    _pipeline(stages).answer("q", history=[])
+    assert stages.research.call_args.args[1] is None
+    assert stages.grade.call_args.args[2] is None
 
 
 def test_history_is_windowed_and_status_messages_emitted():

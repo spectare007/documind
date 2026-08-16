@@ -33,7 +33,14 @@ THREE INDEPENDENT WAYS THIS CANNOT RUN AWAY OR FAIL CLOSED:
    turn it into a structured 503 -- upstream being down is an expected
    condition with a designed response, not an unexpected failure. `check()`
    gets its own inner guard so a verifier crash can never discard an answer
-   that is already in hand.
+   that is already in hand; that guard reports `grounded=None`, never `True`,
+   so an unchecked answer stays distinguishable from a checked one.
+
+WHAT `grounded` MEANS: it is a weak signal, not a guarantee. `True` only
+means a 3B yes/no checker read the whole context and did not object; it has
+been observed to pass an answer that attributed a real number to the wrong
+label, because the digits appeared somewhere in the context. Treat it as
+telemetry. See `app.api.query.QueryOut` and `doc/api.md`.
 """
 
 import logging
@@ -86,15 +93,19 @@ class AgenticPipeline:
         self.settings = get_settings()
 
     def answer(self, question: str, history: list[dict],
-               on_status: StatusCallback | None = None) -> PipelineResult:
+               on_status: StatusCallback | None = None,
+               top_k: int | None = None) -> PipelineResult:
         """Answer `question`. Never raises except for upstream unavailability.
 
-        See the module docstring for the three independent bounds. The
-        signature is fixed: `app.api.openai_compat`'s streaming/chat layer
-        calls this positionally.
+        See the module docstring for the three independent bounds. The first
+        three parameters are positional-compatible on purpose:
+        `app.api.openai_compat`'s streaming/chat layer calls them that way.
+        `top_k` overrides `retrieval_top_k` for this one request (chunks
+        retrieved per search, and the cap on how many are graded); `None`
+        keeps the configured default.
         """
         try:
-            return self._answer(question, history, on_status)
+            return self._answer(question, history, on_status, top_k)
         except LLM_UNAVAILABLE_ERRORS:
             # Expected operating condition with a designed response (503).
             # Re-raised deliberately -- see `app.core.errors`.
@@ -104,7 +115,8 @@ class AgenticPipeline:
             return PipelineResult(answer=FAILURE_ANSWER)
 
     def _answer(self, question: str, history: list[dict],
-                on_status: StatusCallback | None) -> PipelineResult:
+                on_status: StatusCallback | None,
+                top_k: int | None = None) -> PipelineResult:
         notify = on_status or (lambda _msg: None)
         history_text = "\n".join(
             f"{m['role']}: {m['content']}" for m in history[-HISTORY_TURNS:]
@@ -139,12 +151,12 @@ class AgenticPipeline:
             notify("Rewriting query…")
             queries = self.stages.rewrite(question, history_text, feedback)
             notify("Searching documents…")
-            all_chunks: list[RetrievedChunk] = self.stages.research(queries)
+            all_chunks: list[RetrievedChunk] = self.stages.research(queries, top_k)
             if not all_chunks:
                 feedback = _NO_MATCH_FEEDBACK
                 continue
             notify("Grading context…")
-            keep = self.stages.grade(question, all_chunks)
+            keep = self.stages.grade(question, all_chunks, top_k)
             relevant = [all_chunks[i] for i in keep]
             if relevant:
                 break
@@ -157,7 +169,8 @@ class AgenticPipeline:
                 retrieval_attempts=attempts,
             )
 
-        grounded, answer, gen_attempts = True, "", 0
+        grounded: bool | None = True
+        answer, gen_attempts = "", 0
         feedback = ""
         for attempt in range(self.settings.max_generation_attempts):
             if attempt > 0 and out_of_time("answer regeneration"):
@@ -167,14 +180,17 @@ class AgenticPipeline:
             answer = self.stages.synthesize(question, relevant, feedback)
             notify("Verifying groundedness…")
             grounded = self._check(answer, relevant)
-            if grounded:
+            # Only an explicit `False` is a reason to regenerate. `None` means
+            # the checker never ran, which is not a negative verdict and must
+            # not burn the remaining attempt.
+            if grounded is not False:
                 break
             feedback = _UNGROUNDED_FEEDBACK
 
-        if not grounded:
+        if grounded is False:
             logger.warning(
-                "answer still ungrounded after %d generation attempt(s); "
-                "returning it flagged", gen_attempts,
+                "groundedness check still failing after %d generation attempt(s); "
+                "returning the answer flagged", gen_attempts,
             )
         return PipelineResult(
             answer=answer, citations=build_citations(relevant), chunks=relevant,
@@ -182,19 +198,24 @@ class AgenticPipeline:
             retrieval_attempts=attempts, generation_attempts=gen_attempts,
         )
 
-    def _check(self, answer: str, chunks: list[RetrievedChunk]) -> bool:
-        """Groundedness check that fails open, matching `parse_verdict`.
+    def _check(self, answer: str, chunks: list[RetrievedChunk]) -> bool | None:
+        """Run the groundedness signal; `None` means "no check was performed".
 
         By this point an answer exists. A verifier that crashes is not
         evidence the answer is bad, and treating it as "ungrounded" would
         either burn the regeneration attempt or (on the last attempt) ship a
-        good answer flagged as untrustworthy. Both are worse than trusting
-        it. Catches broadly on purpose -- including upstream errors, since
-        one flaky verifier call should not cost the user an answer we
-        already have.
+        good answer flagged as untrustworthy. So the answer is kept either
+        way. It is deliberately *not* reported as `True`: `True` means a
+        checker ran and did not object, and a consumer has to be able to tell
+        an unchecked answer from a checked one. Catches broadly on purpose --
+        including upstream errors, since one flaky verifier call should not
+        cost the user an answer we already have.
         """
         try:
             return self.stages.check(answer, chunks)
         except Exception as exc:
-            logger.warning("groundedness check failed (%s); assuming grounded", exc)
-            return True
+            logger.warning(
+                "groundedness check failed (%s); returning the answer unchecked "
+                "(grounded=None)", exc,
+            )
+            return None

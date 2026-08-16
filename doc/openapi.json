@@ -645,18 +645,22 @@
                 "type": "null"
               }
             ],
-            "title": "Mode"
+            "title": "Mode",
+            "description": "Pipeline to run. Omit to use the server's configured DOCUMIND_PIPELINE_MODE (default: simple)."
           },
           "top_k": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "maximum": 50.0,
+                "minimum": 1.0
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Top K"
+            "title": "Top K",
+            "description": "Chunks to retrieve per search for this request, overriding DOCUMIND_RETRIEVAL_TOP_K. Also caps how many chunks the agentic pipeline's relevance grader grades. Omit to use the configured default."
           }
         },
         "type": "object",
@@ -694,7 +698,8 @@
                 "type": "null"
               }
             ],
-            "title": "Grounded"
+            "title": "Grounded",
+            "description": "Weak groundedness signal, not a hallucination guarantee. true: a small local yes/no model read the answer against the retrieved context and did not object. false: it objected, and the answer is returned anyway, flagged. null: no check ran (direct non-retrieval reply, no answer produced, or the checker itself failed). It is a 3B model's single yes/no over the whole context and has been observed to pass an answer that attached a real number to the wrong label, so treat true as telemetry and never as proof the answer is correct."
           },
           "mode": {
             "type": "string",

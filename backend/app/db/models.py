@@ -18,10 +18,22 @@ class Base(DeclarativeBase):
 
 
 class DocumentRecord(Base):
+    """One row per source file, keyed on `filename`.
+
+    `filename` is the document's identity, so a file that changes on disk
+    keeps the same row and the same `id`, and `id` is therefore stable enough
+    to use as the vector store's `ref_doc_id` across re-ingests.
+
+    `sha256` is a *change signal*, not an identity: it records the bytes the
+    current row was built from so an unchanged file can be skipped. It is
+    deliberately not unique, because two differently named files may hold
+    identical bytes and both deserve a row.
+    """
+
     __tablename__ = "documents"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
-    filename: Mapped[str] = mapped_column(String(512))
-    sha256: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    filename: Mapped[str] = mapped_column(String(512), unique=True, index=True)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(16), default="pending")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)

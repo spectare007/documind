@@ -136,9 +136,13 @@ Five CrewAI agent roles, one crew (single agent, single task) per stage, orchest
 
 **Two independently bounded correction loops:**
 - Retrieval loop (`max_retrieval_attempts = 2`): no/irrelevant chunks → rewrite once, retry.
-- Generation loop (`max_generation_attempts = 2`): ungrounded answer → regenerate once with feedback.
+- Generation loop (`max_generation_attempts = 2`): a "no" from the checker → regenerate once with feedback.
 
 Plus a wall-clock request budget (300s) checked at stage boundaries, independent of both attempt caps.
+
+**This pipeline is opt-in, not the default** (`DOCUMIND_PIPELINE_MODE=agentic`, or `"mode": "agentic"` per request). The default is simple mode: see the evaluation slide for the measurement that decided it.
+
+**`grounded` is a signal, not a guarantee.** The checker is one yes/no completion from the same 3B model over the whole context, verifying textual presence rather than semantic support. `true` means only "it did not object", `null` means no check ran, and the verdict parser is fail-open. It is reported as telemetry, never as proof an answer is correct.
 
 **Measured against the real, fully populated corpus (25 golden-set questions, `doc/evaluation-report.md`):** latency ranges from 60s (min) to 258s (max), median 125s, mean 132s. An earlier per-stage timing figure (router 2.6s, rewriter 3.2s, researcher+tool 12.9s, synthesizer 5.0s, checker 2.7s, totaling ~28.6s crew / ~37s over HTTP) was measured against an empty index before the corpus was ingested and does not reflect real usage; it is superseded by the numbers above.
 
@@ -217,6 +221,7 @@ Runtime prompt used by the crew
 - The 8 refusals on answerable questions were all traced to the per-chunk relevance grader rejecting every retrieved chunk before synthesis ran, not to a retrieval failure (confirmed by re-running 4 of them in simple mode, which answered all 4 correctly from the same index).
 - Latency: min 60s, median 125s, mean 132s, max 258s over the 25 questions.
 - A fail-open grader fix (proceed to synthesis on the top-ranked chunks when the grader rejected all of them) was tried, found to fix those 8 refusals but fabricate an answer on an unanswerable question, and reverted.
+- **Consequence: simple mode ships as the default.** Agentic mode is fully supported and one setting (or one request field) away, but the pipeline that answers more questions in a third of the time is what a first-time user should meet first. Shipping the more impressive architecture as the default, when the measurement says it is the worse product, would be choosing the demo over the user.
 
 ---
 
@@ -233,9 +238,10 @@ The most interesting failures this build actually surfaced:
 
 ## Trade-offs & limitations
 
-- **CPU-only latency.** Measured against the real corpus over 25 questions: simple mode 25 to 82s, agentic mode 60 to 258s (median 125s, mean 132s). This is the assessment's own constraint, not a config miss: the user explicitly chose agentic depth over speed.
+- **CPU-only latency.** Measured against the real corpus over 25 questions: simple mode 25 to 82s, agentic mode 60 to 258s (median 125s, mean 132s). This is the assessment's own constraint, not a config miss: the user explicitly chose agentic depth over speed, so the agentic pipeline is built in full and kept fully supported. What changed is only which one you get without asking.
 - **The judge is a small local model, not a frontier one.** `qwen2.5:7b` on CPU makes RAGAs scores directionally useful, not precise. Same judge scores both pipelines, so the comparison is more trustworthy than any single absolute score.
-- **The per-chunk grader is measurably over-selective.** Across the full 25-question sweep against the real corpus, the grader rejected every retrieved chunk on 8 of 23 answerable questions, driving agentic mode's recall well below simple mode's (`doc/evaluation-report.md`). A fail-open fallback around the grader was tried and fixed those refusals, but it also caused a fabricated answer on a genuinely unanswerable question, so it was reverted; the grader's recall gap remains open, with a larger judge model (`qwen2.5:7b`) identified as the next thing to try.
+- **The per-chunk grader is measurably over-selective.** Across the full 25-question sweep against the real corpus, the grader rejected every retrieved chunk on 8 of 23 answerable questions, driving agentic mode's recall well below simple mode's (`doc/evaluation-report.md`). A fail-open fallback around the grader was tried and fixed those refusals, but it also caused a fabricated answer on a genuinely unanswerable question, so it was reverted; the grader's recall gap remains open, with a larger judge model (`qwen2.5:7b`) identified as the next thing to try. Until it closes, simple mode is the default.
+- **The groundedness check is a weak safety net, and is labelled as one.** It verifies that an answer's claims appear in the context textually, not that the context supports them, so it once passed an answer that attached a real number to the wrong label. The `grounded` field is documented as a heuristic signal with three values (`true` = did not object, `false` = objected, `null` = no check ran), never as a hallucination guarantee. Verifying claim support rather than string presence is the fix, and it is larger than this assessment had room for.
 
 ---
 

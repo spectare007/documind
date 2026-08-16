@@ -49,6 +49,66 @@ def test_query_validates_empty_question(client):
     assert r.status_code == 422
 
 
+def test_query_forwards_top_k_to_the_pipeline(client):
+    """S6: `top_k` was accepted, validated and exported into the OpenAPI
+    schema, but never read, so a caller asking for more chunks silently got
+    `DOCUMIND_RETRIEVAL_TOP_K` anyway.
+    """
+    result = PipelineResult(answer="ok")
+    with patch("app.api.query.get_pipeline") as gp:
+        gp.return_value.answer = MagicMock(return_value=result)
+        r = client.post("/api/v1/query", headers=AUTH,
+                        json={"question": "q", "mode": "simple", "top_k": 11})
+    assert r.status_code == 200
+    assert gp.return_value.answer.call_args.kwargs["top_k"] == 11
+
+
+def test_query_omitting_top_k_leaves_the_configured_default(client):
+    result = PipelineResult(answer="ok")
+    with patch("app.api.query.get_pipeline") as gp:
+        gp.return_value.answer = MagicMock(return_value=result)
+        r = client.post("/api/v1/query", headers=AUTH,
+                        json={"question": "q", "mode": "simple"})
+    assert r.status_code == 200
+    assert gp.return_value.answer.call_args.kwargs["top_k"] is None
+
+
+@pytest.mark.parametrize("bad", [0, -1, 51])
+def test_query_rejects_an_out_of_range_top_k(client, bad):
+    """`top_k` now costs real work (retrieval, and one grader completion per
+    chunk on CPU), so it is bounded rather than accepted unchecked.
+    """
+    r = client.post("/api/v1/query", headers=AUTH,
+                    json={"question": "q", "top_k": bad})
+    assert r.status_code == 422
+
+
+def test_query_defaults_to_simple_mode(client):
+    """B1: the shipped default is the pipeline that actually answers
+    questions. Agentic mode stays available per request and per deployment.
+    """
+    result = PipelineResult(answer="ok")
+    with patch("app.api.query.get_pipeline") as gp:
+        gp.return_value.answer = MagicMock(return_value=result)
+        r = client.post("/api/v1/query", headers=AUTH, json={"question": "q"})
+    assert r.status_code == 200
+    assert r.json()["mode"] == "simple"
+    assert gp.call_args.args[0] == "simple"
+
+
+def test_grounded_is_reported_verbatim_including_null(client):
+    """B2: `grounded` is a three-valued signal and `null` (no check ran) must
+    survive to the caller rather than being coerced to a boolean.
+    """
+    with patch("app.api.query.get_pipeline") as gp:
+        gp.return_value.answer = MagicMock(
+            return_value=PipelineResult(answer="ok", grounded=None)
+        )
+        r = client.post("/api/v1/query", headers=AUTH, json={"question": "q"})
+    assert r.status_code == 200
+    assert r.json()["grounded"] is None
+
+
 def test_query_llm_connection_timeout_yields_503_not_500(client):
     """Regression test for a review finding: an unwrapped LLM connectivity
     failure used to propagate as FastAPI's generic unhandled 500 (no

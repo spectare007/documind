@@ -26,7 +26,14 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 180.0
 
     # Pipeline
-    pipeline_mode: Literal["agentic", "simple"] = "agentic"
+    # Default is `simple` on measured behaviour, not preference: against the
+    # real corpus agentic mode answered 15 of 23 answerable golden-set
+    # questions at a median of 125s, while simple mode answered correctly
+    # every question it was tried against, in 25 to 82s, from the same index
+    # (doc/evaluation-report.md). Agentic mode stays fully supported and is
+    # opt-in, per request (`"mode": "agentic"`) or per deployment
+    # (`DOCUMIND_PIPELINE_MODE=agentic`).
+    pipeline_mode: Literal["agentic", "simple"] = "simple"
     retrieval_top_k: int = 6
     max_retrieval_attempts: int = 2
     max_generation_attempts: int = 2

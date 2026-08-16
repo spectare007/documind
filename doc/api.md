@@ -64,7 +64,7 @@ List every document in the ingestion ledger.
 ]
 ```
 
-`status` is one of `pending | processing | completed | failed`. A `failed` document carries a non-null `error` (truncated to 2000 characters) and null `page_count`/`chunk_count`/`ingested_at`.
+`status` is one of `pending | processing | completed | failed`. A `failed` document carries a non-null `error` (truncated to 2000 characters) and null `page_count`/`chunk_count`/`ingested_at`. There is exactly one entry per filename: re-ingesting an edited file updates its existing entry in place rather than adding a second one (see `POST /api/v1/ingest`).
 
 ### `POST /api/v1/documents`
 
@@ -73,6 +73,8 @@ Upload a single PDF (multipart form, field name `file`) and ingest it synchronou
 **Request:** `multipart/form-data` with one `file` field, filename ending in `.pdf`.
 
 **Response `201`:** a `DocumentOut`, same shape as above, with `status: "completed"` (or `"failed"` if that specific file didn't parse).
+
+Uploading a filename that already exists overwrites the file on disk and re-ingests it into the **existing** ledger row, so the returned `id` is the one that document already had and its previous chunks are replaced rather than duplicated.
 
 **Errors:**
 - `400`: filename doesn't end in `.pdf`.
@@ -104,6 +106,8 @@ Removes the document's chunks from the vector store and its ledger row.
 ### `POST /api/v1/ingest`
 
 Scans `DOCUMIND_DATA_DIR` for PDFs and (re-)ingests anything new or changed, in a background thread. Already-ingested, unchanged files are skipped (idempotent).
+
+A document's identity is its **filename**, and its SHA-256 is only the change signal. So a file whose bytes changed keeps its existing ledger row and `id`: the hash on that row is updated, the previous version's chunks are deleted from the index under that same `id`, and the new chunks are inserted. There is always exactly one row per filename, and a re-ingested file never appears twice in `GET /api/v1/documents`.
 
 **Response `202`:**
 
@@ -154,8 +158,8 @@ The native, non-chat entry point into the RAG pipeline. This is what `scripts/ev
 ```
 
 - `question` (required, non-blank after trimming; a blank/whitespace-only value is a `422`).
-- `mode` (optional): `"agentic"` or `"simple"`. Omit to use the server's configured `DOCUMIND_PIPELINE_MODE`.
-- `top_k` (optional, currently accepted but not yet wired into either pipeline's retrieval call; retrieval always uses `DOCUMIND_RETRIEVAL_TOP_K`).
+- `mode` (optional): `"agentic"` or `"simple"`. Omit to use the server's configured `DOCUMIND_PIPELINE_MODE`, which defaults to `simple`.
+- `top_k` (optional, integer 1 to 50): how many chunks each search retrieves for this request, overriding `DOCUMIND_RETRIEVAL_TOP_K`. It applies in both modes, and in agentic mode it also caps how many chunks the per-chunk relevance grader grades, so a larger value cannot leave the extra chunks silently retrieved and then discarded. Omit or send `null` for the configured default. Values outside 1 to 50 are a `422`; the upper bound exists because each additional chunk costs a further grader completion on CPU.
 
 **Response `200`** (representative shape; the identifier value below is a synthetic placeholder, not a real acknowledgement number, illustrating the answer format returned for this question with 3 citations and 7 chunks retrieved in ~25s):
 
@@ -191,7 +195,15 @@ The native, non-chat entry point into the RAG pipeline. This is what `scripts/ev
 }
 ```
 
-- `grounded` is `null` for a direct (non-RAG) reply, `true`/`false` for a RAG answer depending on the hallucination checker's verdict (an answer is still returned even when `false`; the flag is informational, not a block).
+- `grounded` is a **weak groundedness signal, not a hallucination guarantee**. It is one yes/no completion from the same local 3B model, asked once over the whole retrieved context, and it verifies textual presence rather than semantic support: it has been observed to pass an answer that attributed a real number to the wrong label, because those digits did appear somewhere in the context. Never present `true` to an end user as proof an answer is correct; treat the field as telemetry about whether a cheap check objected. The field keeps its original name for backwards compatibility. Exactly what produces each value:
+
+  | Value | What it means |
+  |---|---|
+  | `true` | The checker ran and did not reply with an explicit "no". Note the parser is fail-open: any reply that does not start with "no", including an off-format or empty one, counts as `true`. |
+  | `false` | The checker ran and replied "no" on every generation attempt (up to `DOCUMIND_MAX_GENERATION_ATTEMPTS`). The answer is still returned, flagged rather than blocked, and the chat endpoint appends a visible warning to its source list. |
+  | `null` | No check ran. Three cases: a direct (non-retrieval) reply, no answer was produced at all (nothing retrieved, budget exhausted, or an unexpected stage failure), or the checker itself raised, in which case the answer is kept but is explicitly reported as unchecked rather than as `true`. |
+
+  Simple mode never runs the checker, so it always returns `null`.
 - `trace_id` is the OpenTelemetry trace id (hex, 32 chars) for this request's spans in Phoenix; empty string only if tracing failed to initialize.
 - `chunks[].text` includes the ingest-time context header (`[title > section path]`), since that is exactly what the LLM saw.
 
@@ -292,5 +304,5 @@ Most errors are FastAPI's default `{"detail": "..."}` for a plain `HTTPException
 | `400` | Bad request (business-rule rejection, not a schema error) | Non-PDF upload to `POST /api/v1/documents` |
 | `401` | Missing or wrong bearer token | Every route except `GET /health` |
 | `404` | No row with that id | `GET/DELETE /api/v1/documents/{doc_id}`, `GET /api/v1/ingest/{job_id}` |
-| `422` | Request body fails schema/field validation | Blank `question`, bad `mode`, malformed multipart, no user message in `messages` |
+| `422` | Request body fails schema/field validation | Blank `question`, bad `mode`, `top_k` outside 1 to 50, malformed multipart, no user message in `messages` |
 | `503` | Upstream LLM (Ollama) unreachable or timed out | `/api/v1/query`, non-streaming `/v1/chat/completions` |

@@ -137,6 +137,31 @@ def _stages_with_tool_calls(retriever, calls):
     return stages
 
 
+def test_research_threads_top_k_into_the_direct_fallback():
+    """S6: the fallback path must size retrieval the same as the tool path,
+    or the chunk count would depend on whether the agent called its tool.
+    """
+    retriever = _retriever(_chunk("x"))
+    stages, _ = _stages(retriever=retriever, outputs=["searched"])
+    stages.research(["q1"], top_k=11)
+    assert retriever.retrieve.call_args.kwargs["top_k"] == 11
+
+
+def test_research_threads_top_k_into_the_search_tool():
+    retriever = _retriever(_chunk("x"))
+    stages = _stages_with_tool_calls(retriever, calls=1)
+    stages.research(["q1"], top_k=11)
+    assert retriever.retrieve.call_args.kwargs["top_k"] == 11
+
+
+def test_grade_cap_follows_an_explicit_top_k():
+    """A larger `top_k` must not leave the extra chunks silently ungraded."""
+    stages, llm = _stages_for_grade(llm_outputs=["yes"] * 10)
+    kept = stages.grade("q", [_chunk(f"c{i}") for i in range(10)], top_k=9)
+    assert llm.call.call_count == 9
+    assert len(kept) == 9
+
+
 def test_research_dedupes_on_doc_id_and_text_not_text_alone():
     """Minor: identical text in two different documents is two citations."""
     retriever = MagicMock()

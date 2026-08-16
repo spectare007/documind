@@ -45,8 +45,12 @@ class DocumentSearchTool(BaseTool):
     # tests/unit/test_agentic_stages.py::test_tool_appends_to_the_callers_buffer.
     buffer: SkipValidation[list[RetrievedChunk]]
 
+    # Per-request override for `retrieval_top_k`, threaded down from
+    # `POST /api/v1/query`'s `top_k`. `None` keeps the configured default.
+    top_k: int | None = None
+
     def _run(self, query: str) -> str:
-        chunks = self.retriever.retrieve(query)
+        chunks = self.retriever.retrieve(query, top_k=self.top_k)
         self.buffer.extend(chunks)
         if not chunks:
             return "No results found."
