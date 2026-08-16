@@ -14,11 +14,6 @@ async def lifespan(app: FastAPI):
     setup_logging()
     from app.db.session import init_db
     init_db()
-    try:  # tracing + prompt sync are best-effort (real impls in Tasks 8-9)
-        from app.observability.tracing import setup_tracing
-        setup_tracing()
-    except ImportError:
-        logger.info("tracing module not present yet")
     try:
         from app.observability.prompts import get_prompt_manager
         manager = get_prompt_manager()
@@ -32,6 +27,11 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    # Configured here (idempotently -- see `setup_logging`) rather than only
+    # in `lifespan()`, so `setup_tracing()` below has a real handler to log
+    # through instead of silently losing its INFO-level summary to Python's
+    # unconfigured-root-logger last-resort handler (WARNING+ only).
+    setup_logging()
     app = FastAPI(
         title="DocuMind API",
         version="1.0.0",
@@ -40,6 +40,21 @@ def create_app() -> FastAPI:
     )
     from app.core.middleware import CorrelationIdMiddleware
     app.add_middleware(CorrelationIdMiddleware)
+    try:  # tracing is best-effort (real impl in Task 8)
+        # Must run here -- synchronously, before this function returns --
+        # rather than inside `lifespan()`. Starlette caches
+        # `self.middleware_stack` on the app's very first ASGI call, which
+        # for uvicorn *is* the lifespan-startup call; instrumenting FastAPI
+        # from inside `lifespan()` (as an earlier version of this code did)
+        # patches `build_middleware_stack` after Starlette already built and
+        # cached the uninstrumented stack, so it silently never takes effect
+        # for any real request even though instrumentation "succeeds" with
+        # no error. Calling it here, before `app` is ever invoked, avoids
+        # that trap.
+        from app.observability.tracing import setup_tracing
+        setup_tracing(app)
+    except ImportError:
+        logger.info("tracing module not present yet")
     from app.api import documents, health, ingest
     app.include_router(health.router)
     protected = [Depends(require_api_key)]
