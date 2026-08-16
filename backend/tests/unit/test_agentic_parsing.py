@@ -6,7 +6,13 @@ defaults to retrieval, grading defaults to keeping everything, and the
 groundedness check fails open.
 """
 
-from app.agents.stages import parse_indices, parse_queries, parse_route, parse_verdict
+from app.agents.stages import (
+    parse_indices,
+    parse_queries,
+    parse_relevance_verdict,
+    parse_route,
+    parse_verdict,
+)
 
 
 def test_parse_route():
@@ -44,3 +50,32 @@ def test_parse_verdict():
     assert parse_verdict("yes") is True
     assert parse_verdict(" No\n") is False
     assert parse_verdict("unclear") is True  # fail open: do not block answers
+
+
+def test_parse_relevance_verdict():
+    assert parse_relevance_verdict("YES") is True
+    assert parse_relevance_verdict(" no\n") is False
+    assert parse_relevance_verdict("yes, this helps") is True
+    assert parse_relevance_verdict("No, unrelated") is False
+    assert parse_relevance_verdict("unclear") is True  # fail open: keep the chunk
+
+
+def test_parse_relevance_verdict_does_not_repeat_the_nested_substring_bug():
+    """ADR-9's near miss: an earlier grader asked for RELEVANT/IRRELEVANT and
+    reused `parse_verdict`'s "no"-prefix check against that vocabulary.
+    "IRRELEVANT" does not start with "no", so every chunk was silently kept
+    regardless of the model's actual verdict -- a rubber-stamp grader
+    dressed up as a discriminating one. "relevant" is a literal substring of
+    "irrelevant", which is exactly the trap a naive `"relevant" in text`
+    (or a check written for the wrong vocabulary) falls into.
+
+    This parser is written for its own yes/no vocabulary and is anchored
+    with `startswith`, not a substring search, so a reply that happens to
+    contain "relevant"/"irrelevant" text (rather than yes/no) is simply
+    unparseable and fails open -- it is never mistaken for an affirmative
+    "yes" by matching a nested substring.
+    """
+    assert parse_relevance_verdict("IRRELEVANT") is True  # unparseable -> fails open
+    assert parse_relevance_verdict("RELEVANT") is True  # unparseable -> fails open, not
+    # "matched because it starts with yes" -- it doesn't start with "yes" either.
+    assert not "RELEVANT".lower().startswith("yes")

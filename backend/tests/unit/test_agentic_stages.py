@@ -164,45 +164,71 @@ def test_research_survives_a_crew_failure():
     assert [c.text for c in stages.research(["q1"])] == ["x"]
 
 
-def test_grade_asks_once_per_chunk_and_keeps_the_yeses():
-    """Ruling A: one binary verdict per chunk, not one JSON-array call.
+def _stages_for_grade(llm_outputs=None, llm_side_effect=None):
+    """CrewStages whose `llm.call` (not `_kickoff`) is stubbed.
 
-    qwen2.5:3b answers `[]` to the array form for *every* input once CrewAI
-    appends its expected-output boilerplate; it answers yes/no per chunk
-    correctly (6/6 live). The public signature is unchanged -- still indices
-    into the caller's list.
+    `grade()` is the one stage that calls `self.llm.call(...)` directly
+    instead of going through `_kickoff()`'s Agent/Task/Crew wrapping (see
+    `grade()`'s docstring and ADR-9 for why) -- so its tests mock the LLM
+    directly rather than `_kickoff`, and record the rendered prompts via
+    `call_args_list` instead of the `_kickoff`-call `calls` list the other
+    stage tests use.
     """
-    stages, calls = _stages(outputs=["no", "yes"])
+    from app.agents.stages import CrewStages
+
+    llm = MagicMock()
+    if llm_side_effect is not None:
+        llm.call.side_effect = llm_side_effect
+    else:
+        llm.call.side_effect = list(llm_outputs or [])
+    stages = CrewStages(llm=llm, retriever=_retriever())
+    return stages, llm
+
+
+def test_grade_asks_once_per_chunk_and_keeps_the_yeses():
+    """Ruling A/B/C (see `grade()`'s docstring): one binary verdict per
+    chunk, run as a direct LLM call rather than a JSON-array call or a
+    CrewAI Agent/Task -- both of those failed live. The public signature is
+    unchanged -- still indices into the caller's list.
+    """
+    stages, llm = _stages_for_grade(llm_outputs=["no", "yes"])
     assert stages.grade("q", [_chunk("first"), _chunk("second")]) == [1]
-    assert len(calls) == 2, "one crew call per chunk"
-    assert "first" in calls[0]["description"] and "second" not in calls[0]["description"]
-    assert "second" in calls[1]["description"]
+    assert llm.call.call_count == 2, "one direct LLM call per chunk"
+    prompts = [c.args[0][0]["content"] for c in llm.call.call_args_list]
+    assert "first" in prompts[0] and "second" not in prompts[0]
+    assert "second" in prompts[1]
+
+
+def test_grade_keeps_a_mixed_batch_only_relevant():
+    """A relevant chunk and a clearly irrelevant one in the same batch:
+    only the relevant index comes back.
+    """
+    stages, _ = _stages_for_grade(llm_outputs=["YES", "NO"])
+    kept = stages.grade("q", [_chunk("relevant one"), _chunk("irrelevant one")])
+    assert kept == [0]
 
 
 def test_grade_keeps_unparseable_verdicts_failing_open():
-    stages, _ = _stages(outputs=["I am not sure about this one", "no"])
+    stages, _ = _stages_for_grade(llm_outputs=["I am not sure about this one", "no"])
     assert stages.grade("q", [_chunk("a"), _chunk("b")]) == [0]
 
 
-def test_grade_keeps_a_chunk_whose_crew_raised():
-    from app.agents.stages import CrewStages
-
-    stages = CrewStages(llm=MagicMock(), retriever=_retriever())
+def test_grade_keeps_a_chunk_whose_llm_call_raised():
     calls = {"n": 0}
 
-    def flaky(role, goal, description, expected_output, tools=None):
+    def flaky(messages):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise RuntimeError("crew exploded")
+            raise RuntimeError("llm call failed")
         return "no"
 
-    stages._kickoff = flaky  # type: ignore[method-assign]
+    stages, _ = _stages_for_grade(llm_side_effect=flaky)
     # Chunk 0's grading blew up -> kept rather than silently dropped.
     assert stages.grade("q", [_chunk("a"), _chunk("b")]) == [0]
 
 
 def test_grade_respects_a_unanimous_no():
-    stages, _ = _stages(outputs=["no", "no"])
+    stages, _ = _stages_for_grade(llm_outputs=["no", "no"])
     assert stages.grade("q", [_chunk("a"), _chunk("b")]) == []
 
 
@@ -210,12 +236,12 @@ def test_grade_caps_the_number_of_chunks_and_prefers_high_scores():
     """Ruling A: bounded on CPU -- at most retrieval_top_k chunks, highest
     scoring first, and the returned indices still address the caller's list.
     """
-    stages, calls = _stages(outputs=["yes"] * 10)
+    stages, llm = _stages_for_grade(llm_outputs=["yes"] * 10)
     chunks = [_chunk(f"c{i}") for i in range(10)]
     chunks[7].score = 0.99  # highest
     chunks[3].score = 0.98
     kept = stages.grade("q", chunks)
-    assert len(calls) == 6, "retrieval_top_k defaults to 6"
+    assert llm.call.call_count == 6, "retrieval_top_k defaults to 6"
     assert 7 in kept and 3 in kept
     assert kept == sorted(kept) and all(0 <= i < 10 for i in kept)
 

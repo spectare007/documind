@@ -88,7 +88,7 @@ def parse_indices(text: str, n_chunks: int) -> list[int]:
 
     NOTE: `grade()` no longer calls this -- it now asks for one binary
     verdict per chunk (see its docstring for the measurements that forced
-    that change) and uses `parse_verdict`. This stays as a public, tested
+    that change) and uses `parse_relevance_verdict`. This stays as a public, tested
     parse helper for any caller that does get an array-of-indices reply
     (e.g. Task 12's evaluation harness scoring a larger model, which handles
     the array form fine); it is the only parser here that reads one.
@@ -129,6 +129,37 @@ def parse_indices(text: str, n_chunks: int) -> list[int]:
 def parse_verdict(text: str) -> bool:
     """Groundedness verdict, failing open: only an explicit "no" blocks."""
     return not text.strip().lower().startswith("no")
+
+
+def parse_relevance_verdict(text: str) -> bool:
+    """Grader verdict: an explicit "yes" keeps the chunk, "no" drops it, and
+    anything else -- an off-format reply, an empty string -- fails open
+    (kept), same fail-open philosophy as every parser in this module.
+
+    Deliberately its own function rather than a reuse of `parse_verdict`.
+    An earlier iteration (see `grade()`'s docstring and ADR-9) asked the
+    grader for RELEVANT/IRRELEVANT instead of yes/no, to dodge a CrewAI
+    agent-framing bug, and reused `parse_verdict`'s "does the reply start
+    with an explicit no" check against that vocabulary. That was silently
+    *inverted*: "IRRELEVANT" does not start with "no", so the fail-open
+    logic kept every chunk regardless of what the model actually judged --
+    the chosen vocabulary meant the opposite of what the parser tested for,
+    and the grader became a no-op rubber stamp. The lesson generalizes
+    beyond that one word pair: a verdict parser must be checked against its
+    own vocabulary, not assumed compatible with a check written for a
+    different one. This function keys on an affirmative "yes" instead (the
+    polarity grading actually needs -- an unreadable verdict must not
+    narrow the evidence the synthesizer sees), and, like `parse_route`, is
+    anchored with `startswith` rather than a substring search: the model is
+    asked for one word, so a stray "yes" or "no" appearing later in a
+    longer off-format reply must not flip the result.
+    """
+    verdict = text.strip().lower()
+    if verdict.startswith("yes"):
+        return True
+    if verdict.startswith("no"):
+        return False
+    return True
 
 
 # --- crew stages: one single-agent Crew per pipeline step ---
@@ -222,19 +253,44 @@ class CrewStages:
 
     def grade(self, question: str, chunks: list[RetrievedChunk]) -> list[int]:
         """Indices of the chunks worth answering from -- one binary verdict
-        per chunk, single-token output.
+        per chunk, single-token output, called as a *direct* LLM completion
+        rather than through a CrewAI Agent/Task like every other stage.
 
-        This is deliberately N cheap calls rather than one clever call. The
-        JSON-array form ("reply with [0, 2]") is unusable on a 3B model once
-        CrewAI appends its expected-output boilerplate to the task: measured
-        live, qwen2.5:3b answered `[]` to *every* input -- relevant chunk,
-        irrelevant chunk, no chunk -- which made the whole pipeline say "I
-        couldn't find anything" for a corpus that did contain the answer.
-        Four rewordings of the criteria line and a rewritten template did not
-        move it. The same model on the same content answers yes/no per chunk
-        correctly (6/6 live, including both true-positive and true-negative
-        cases), because one token about one passage is the easiest possible
-        task for a small model.
+        Three iterations got here, each one measured live against the
+        deployed qwen2.5:3b, not assumed:
+
+        1. JSON-array form ("reply with [0, 2]") is unusable on a 3B model
+           once CrewAI appends its expected-output boilerplate to the task:
+           qwen2.5:3b answered `[]` to *every* input -- relevant chunk,
+           irrelevant chunk, no chunk -- which made the whole pipeline say
+           "I couldn't find anything" for a corpus that did contain the
+           answer.
+        2. A rewording to one yes/no verdict per chunk, still run through
+           the same `_kickoff()` (`Agent`+`Task`+`Crew`) path as every other
+           stage, did not fix it: it still answered "no" for essentially
+           every chunk regardless of content. The cause was not the
+           question's wording -- it was CrewAI's own scaffolding. Isolating
+           the variables live showed the injected system message
+           (role+goal) alone flips this model negative independent of
+           content: even the control question "Is grass green? Answer YES
+           or NO." answered "no" once that system message was present, and
+           "yes" with it removed. Sidestepping the vocabulary (asking for
+           RELEVANT/IRRELEVANT instead of yes/no) only produced a different
+           failure: the model settled on "IRRELEVANT" for every chunk, which
+           doesn't start with "no", so the fail-open parser kept everything
+           -- a rubber-stamp grader, not a discriminating one, and an
+           inverted-semantics near miss (see `parse_relevance_verdict`).
+        3. Removing the CrewAI Agent/Task wrapper entirely for this one
+           stage -- a direct `self.llm.call(...)` completion, no system
+           message, no expected-output footer -- restored genuine per-chunk
+           discrimination: 6/6 correct live (both true-positive and
+           true-negative), including on a genuinely unanswerable question.
+           Grading is a binary classifier with no goal, no tools, no
+           delegation and no multi-step reasoning, so an agent framing was
+           never buying anything here; the other five roles keep using
+           `_kickoff()` and the multi-agent architecture is otherwise
+           unchanged. See ADR-9 in `doc/design-decisions.md` for the full
+           record, deliberately including the near-miss.
 
         Bounded on purpose: at most `retrieval_top_k` chunks are graded,
         highest-scoring first, so a broad retrieval cannot turn one request
@@ -242,12 +298,14 @@ class CrewStages:
         address the *caller's* list, so the signature and semantics are
         unchanged from the array version.
 
-        Fails open per chunk, reusing `parse_verdict`'s convention: only an
-        explicit "no" drops a chunk, so an unreadable reply (or a crew that
-        raised outright) keeps it. An empty result therefore means every
-        graded chunk was explicitly rejected -- a real judgment, which is
-        what drives the corrective retrieval retry -- and can never be an
-        artifact of a model answering off-format.
+        Fails open per chunk via `parse_relevance_verdict`: only an explicit
+        "yes" keeps a chunk that the parser can read, and a raised exception
+        (LLM call failed) also keeps it rather than silently dropping it --
+        see that function's docstring for why this needed its own parser
+        instead of reusing `parse_verdict`. An empty result therefore means
+        every graded chunk was explicitly rejected -- a real judgment, which
+        is what drives the corrective retrieval retry -- and can never be an
+        artifact of a model answering off-format or a transient LLM failure.
         """
         if not chunks:
             return []
@@ -262,17 +320,14 @@ class CrewStages:
 
         keep: list[int] = []
         for i in graded:
+            prompt = self.prompts.get("grader", question=question, chunk=chunks[i].text)
             try:
-                out = self._kickoff(
-                    "Relevance Grader", "Judge each piece of context on its own",
-                    self.prompts.get("grader", question=question, chunk=chunks[i].text),
-                    "one word: yes or no",
-                )
+                out = self.llm.call([{"role": "user", "content": prompt}])
             except Exception as exc:
                 logger.warning("grading chunk %d failed (%s); keeping it", i, exc)
                 keep.append(i)
                 continue
-            if parse_verdict(out):
+            if parse_relevance_verdict(out):
                 keep.append(i)
         logger.info("grade stage: kept %d of %d graded chunk(s)", len(keep), len(graded))
         return sorted(keep)

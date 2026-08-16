@@ -1,14 +1,25 @@
 name: grader
-version: 2
-description: Grade a single retrieved chunk for relevance to the question (binary verdict).
+version: 4
+description: >
+  Grade a single retrieved chunk for relevance to the question (binary
+  verdict). This is now called as a *direct* LLM completion by
+  `CrewStages.grade()`, not through a CrewAI Agent/Task like the other
+  stages -- see that method's docstring and ADR-9 in
+  `doc/design-decisions.md` for why: measured live, the same yes/no question
+  answered "no" for essentially every chunk regardless of content once
+  wrapped in CrewAI's Agent/Task scaffolding (which injects its own system
+  message and an expected-output footer around this template), confirmed
+  content-independent by a control question ("Is grass green?") that also
+  flipped negative under that same system message. Run as a direct
+  completion instead -- no system message, no footer -- this exact phrasing
+  gave genuine discrimination on real retrieved chunks: YES/YES/NO for a
+  question the corpus answers, NO/NO/NO for one it does not. Parsed by
+  `parse_relevance_verdict` (not `parse_verdict`): an explicit "yes" keeps
+  the chunk, "no" drops it, anything unparseable fails open and keeps it.
 template: |
-  You are a relevance grader. Decide whether the context below contains
-  information that helps answer the question. It does not have to answer the
-  question completely -- partial or supporting information counts.
-
   Question: {question}
 
-  Context:
+  Text:
   {chunk}
 
-  Reply with exactly one word: yes if this context helps, no if it does not.
+  Could this text be useful when answering the question? Answer only YES or NO.
