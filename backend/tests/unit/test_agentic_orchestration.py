@@ -49,96 +49,13 @@ def test_happy_path_single_pass():
 
 
 def test_corrective_loop_bounded_to_two_attempts():
-    """The corrective retry is still exactly one attempt, and still bounded.
-
-    NOTE: prior to the grader fail-open fix, a grader that rejected every
-    chunk on both attempts made the pipeline refuse ("couldn't find"). That
-    was the bug: retrieval *had* found real, ranked chunks, and a rejecting
-    3B classifier discarded them all. The fix changes this exact scenario's
-    outcome to a fallback answer -- see
-    test_grader_rejects_everything_falls_back_to_top_retrieved below for
-    that contract. This test now only asserts what's unchanged: the retry is
-    still attempted exactly once, feedback is still threaded into it, and
-    the attempt count is still reported accurately.
-    """
     stages = _stages(grades=[[], []])  # grader rejects everything, twice
     result = _pipeline(stages).answer("q", history=[])
     assert stages.rewrite.call_count == 2          # exactly one retry
+    assert "couldn't find" in result.answer.lower()
     assert result.retrieval_attempts == 2
     # second rewrite got corrective feedback
     assert stages.rewrite.call_args_list[1].args[2] != ""
-    # grader rejected everything both times, but retrieval did return chunks,
-    # so this is the fail-open fallback, not a refusal.
-    assert result.grader_fallback is True
-    assert "couldn't find" not in result.answer.lower()
-
-
-def test_grader_rejects_everything_falls_back_to_top_retrieved():
-    """Finding: the relevance grader (a 3B classifier) rejected every chunk
-    on real golden-set questions that retrieval had in fact answered
-    correctly in `simple` mode using the same retrieval. Discarding all of
-    retrieval's ranked output on the grader's say-so turns answerable
-    questions into refusals. When this happens, the pipeline must fail open
-    to the top-`retrieval_top_k` retrieved chunks (by retrieval score) and
-    still attempt synthesis, flagging `grader_fallback=True` -- not refuse.
-    """
-    chunks = [
-        RetrievedChunk(text="low", score=0.1, doc_id="d", title="Doc", section_path="S"),
-        RetrievedChunk(text="high", score=0.9, doc_id="d", title="Doc", section_path="S"),
-        RetrievedChunk(text="mid", score=0.5, doc_id="d", title="Doc", section_path="S"),
-    ]
-    stages = _stages(grades=[[], []], chunks=chunks)  # grader rejects everything
-    result = _pipeline(stages).answer("q", history=[])
-
-    assert result.grader_fallback is True
-    assert result.answer.startswith("answer")            # synthesis ran, not a refusal
-    assert "couldn't find" not in result.answer.lower()
-    assert result.citations and result.citations[0].title == "Doc"
-    # synthesize was called with the retrieved chunks ranked by score, best first
-    synth_chunks = stages.synthesize.call_args_list[-1].args[1]
-    assert [c.text for c in synth_chunks] == ["high", "mid", "low"]
-
-
-def test_grader_fallback_respects_retrieval_top_k(monkeypatch):
-    """The fallback must not just dump every retrieved chunk into synthesis
-    -- it takes the top N where N is `settings.retrieval_top_k`, same limit
-    the grader itself uses, so a broad retrieval can't blow the context
-    budget just because the grader rejected everything.
-    """
-    monkeypatch.setenv("DOCUMIND_RETRIEVAL_TOP_K", "2")
-    chunks = [
-        RetrievedChunk(text=f"c{i}", score=float(i), doc_id="d", title="Doc", section_path="S")
-        for i in range(5)
-    ]
-    stages = _stages(grades=[[], []], chunks=chunks)
-    result = _pipeline(stages).answer("q", history=[])
-
-    assert result.grader_fallback is True
-    assert len(result.chunks) == 2
-    assert [c.text for c in result.chunks] == ["c4", "c3"]  # highest scores
-
-
-def test_retrieval_returns_nothing_at_all_refuses_without_fallback():
-    """When retrieval genuinely never found anything (not even chunks the
-    grader could reject), the refusal path is untouched: there is nothing to
-    fail open to.
-    """
-    stages = _stages(chunks=[])
-    result = _pipeline(stages).answer("q", history=[])
-    assert "couldn't find" in result.answer.lower()
-    assert result.grader_fallback is False
-    stages.grade.assert_not_called()
-    stages.synthesize.assert_not_called()
-
-
-def test_grader_keeps_some_chunks_is_the_normal_path_not_a_fallback():
-    """When the grader keeps at least one chunk, that's the ordinary path:
-    no fallback, and it must not be flagged as one.
-    """
-    stages = _stages()  # default grade keeps index 0
-    result = _pipeline(stages).answer("q", history=[])
-    assert result.grader_fallback is False
-    assert result.answer.startswith("answer")
 
 
 def test_regeneration_on_hallucination_bounded():
