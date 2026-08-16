@@ -48,6 +48,51 @@ def test_scrub_is_a_noop_when_nothing_leaked(monkeypatch):
     assert os.environ["DOCUMIND_TEST_PRE_EXISTING"] == "keep-me"
 
 
+def test_openai_instrumentor_is_registered_and_importable():
+    """Ruling B: "trace all inference calls" was not satisfied before.
+
+    crewai 1.x routes `ollama/...` to its native `OpenAICompatibleCompletion`,
+    which calls the `openai` SDK directly and never touches LiteLLM (which
+    isn't even installed), so Phoenix showed agent/tool spans but zero LLM
+    spans. `OpenAIInstrumentor` patches the SDK that is actually called.
+    Each instrumentor must stay independently importable so one failure
+    cannot disable the others.
+    """
+    from app.observability.tracing import _process_wide_instrumentors
+
+    registered = dict(_process_wide_instrumentors())
+    assert "openai" in registered
+    # The instrument fn imports lazily; check the package is actually present
+    # rather than silently no-oping the whole point of this fix.
+    from openinference.instrumentation.openai import OpenAIInstrumentor
+
+    assert OpenAIInstrumentor is not None
+
+
+def test_one_failing_instrumentor_does_not_disable_the_others(monkeypatch):
+    """Each entry is attempted in its own try/except."""
+    import app.observability.tracing as tracing_module
+
+    attempted = []
+
+    def boom(_tp):
+        attempted.append("crewai")
+        raise RuntimeError("version mismatch")
+
+    def ok(_tp):
+        attempted.append("openai")
+
+    monkeypatch.setattr(tracing_module, "_process_wide_instrumentors",
+                        lambda: [("crewai", boom), ("openai", ok)])
+    monkeypatch.setattr(tracing_module, "_initialized", False)
+    monkeypatch.setattr(tracing_module, "_tracer_provider", None)
+    monkeypatch.setattr("phoenix.otel.register", lambda **kw: None)
+
+    tracing_module.setup_tracing()  # must not raise
+
+    assert attempted == ["crewai", "openai"]
+
+
 def test_no_env_pollution_context_manager_cleans_up_even_on_error(monkeypatch):
     """`app.agents` wraps its `import crewai` in this; a failed import must
     still not leave the process environment poisoned.

@@ -3,8 +3,23 @@
 Registers an OpenTelemetry TracerProvider that exports spans to Arize
 Phoenix over OTLP-HTTP under the `documind` project, then attempts to attach
 OpenInference/OpenTelemetry auto-instrumentation for FastAPI (the ASGI
-request layer), CrewAI, LlamaIndex, and LiteLLM, so both inbound HTTP
-requests and agent/LLM calls (Tasks 9-11) show up as spans automatically.
+request layer), CrewAI, LlamaIndex, LiteLLM and the OpenAI SDK, so both
+inbound HTTP requests and agent/LLM calls (Tasks 9-11) show up as spans
+automatically.
+
+WHY BOTH LiteLLM *AND* OpenAI INSTRUMENTORS (fix for a review finding):
+"trace all inference calls" was not actually satisfied before. On crewai
+1.x, `crewai.LLM(model="ollama/...", base_url=...)` is a factory that
+returns a *native provider* -- `OpenAICompatibleCompletion` -- which calls
+the `openai` SDK directly against Ollama's OpenAI-compatible `/v1`
+endpoint. It never touches LiteLLM; litellm is not even installed (it
+became an optional `crewai[litellm]` extra), so `LiteLLMInstrumentor`
+attaches to nothing and logs a `DependencyConflict` at startup. The result
+was a Phoenix trace tree with CHAIN/AGENT/TOOL spans but *zero* LLM spans:
+no prompts, no completions, no token counts. `OpenAIInstrumentor` patches
+the SDK crewai actually calls, which restores them. LiteLLM's instrumentor
+is kept because it costs nothing when absent and would cover any future
+model that does route through LiteLLM.
 
 The FastAPI instrumentor is what actually creates the root "server span" for
 each HTTP request -- without it there is no active OTel span during request
@@ -223,8 +238,14 @@ def _process_wide_instrumentors():
 
         LiteLLMInstrumentor().instrument(tracer_provider=tracer_provider)
 
+    def _openai(tracer_provider):
+        from openinference.instrumentation.openai import OpenAIInstrumentor
+
+        OpenAIInstrumentor().instrument(tracer_provider=tracer_provider)
+
     return [
         ("crewai", _crewai),
         ("llama_index", _llama_index),
         ("litellm", _litellm),
+        ("openai", _openai),
     ]

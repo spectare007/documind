@@ -995,6 +995,7 @@ dependencies = [
     { name = "openinference-instrumentation-crewai" },
     { name = "openinference-instrumentation-litellm" },
     { name = "openinference-instrumentation-llama-index" },
+    { name = "openinference-instrumentation-openai" },
     { name = "opentelemetry-instrumentation-fastapi" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
@@ -1031,6 +1032,7 @@ requires-dist = [
     { name = "openinference-instrumentation-crewai", specifier = ">=0.1" },
     { name = "openinference-instrumentation-litellm", specifier = ">=0.1" },
     { name = "openinference-instrumentation-llama-index", specifier = ">=3.0" },
+    { name = "openinference-instrumentation-openai", specifier = ">=0.1" },
     { name = "opentelemetry-instrumentation-fastapi", specifier = ">=0.63b1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.8" },
@@ -2634,6 +2636,24 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/3d/b2/61666f3a4342577fb52328a017aa375f9fcc8c1ce8f0ecc233f13708ffe1/openinference_instrumentation_llama_index-4.4.5.tar.gz", hash = "sha256:7b516901345dda3607cff91d31ca6320093f3f13f181a3501302b05c17969690", size = 63190, upload-time = "2026-08-07T14:29:22.299Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/2a/c9/a72b6947713ea736f13fd4a9181a56748735d478c4f42abc34933c986426/openinference_instrumentation_llama_index-4.4.5-py3-none-any.whl", hash = "sha256:d34dd6d887a55f68002f532b29f69aa13110155e5c1ea5b97ed469cce1c667f5", size = 29815, upload-time = "2026-08-07T14:29:21.287Z" },
+]
+
+[[package]]
+name = "openinference-instrumentation-openai"
+version = "0.1.54"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "openinference-instrumentation" },
+    { name = "openinference-semantic-conventions" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-instrumentation" },
+    { name = "opentelemetry-semantic-conventions" },
+    { name = "typing-extensions" },
+    { name = "wrapt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/98/f0/d20c42cb1adb63db512531269584e969ea8296f4c19d8e0c07ce5be8fcef/openinference_instrumentation_openai-0.1.54.tar.gz", hash = "sha256:665ce91fc57e631ce124ac9ae242474dfee77bacdc477e8610a3505737399720", size = 23145, upload-time = "2026-08-07T14:29:19.369Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e8/da/5e2767427c8ac8336bdd655620a80141e0801c4986c6493d34f26536ade4/openinference_instrumentation_openai-0.1.54-py3-none-any.whl", hash = "sha256:19864c980303c6a3240a8add57b1c0b0fed9bcb46a0f14d4e36760b9a026bee2", size = 30585, upload-time = "2026-08-07T14:29:18.112Z" },
 ]
 
 [[package]]

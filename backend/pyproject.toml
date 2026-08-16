@@ -25,6 +25,7 @@ dependencies = [
     "openinference-instrumentation-llama-index>=3.0",
     "openinference-instrumentation-litellm>=0.1",
     "opentelemetry-instrumentation-fastapi>=0.63b1",
+    "openinference-instrumentation-openai>=0.1",
 ]
 
 [dependency-groups]

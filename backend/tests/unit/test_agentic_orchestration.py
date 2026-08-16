@@ -77,6 +77,74 @@ def test_empty_retrieval_retries_then_gives_up_without_generating():
     assert result.grounded is None
 
 
+def test_failing_check_fails_open_and_keeps_the_answer():
+    """Finding D: the worst outcome is `check()` throwing away an answer we
+    already have. A verifier failure must not cost the user the answer.
+    """
+    stages = _stages()
+    stages.check.side_effect = RuntimeError("verifier blew up")
+    result = _pipeline(stages).answer("q", history=[])
+    assert result.answer.startswith("answer")
+    assert result.grounded is True          # failed open, same as parse_verdict
+    assert result.generation_attempts == 1  # not retried as if ungrounded
+
+
+def test_unexpected_stage_failure_returns_a_result_not_an_exception():
+    """Finding D: an unexpected stage exception used to escape as a bare 500,
+    and in Task 11 would abort a stream mid-flight with no message.
+    """
+    stages = _stages()
+    stages.synthesize.side_effect = RuntimeError("boom")
+    result = _pipeline(stages).answer("q", history=[])
+    assert result.grounded is None
+    assert result.answer and "couldn't" in result.answer.lower()
+    assert result.route == "rag"
+
+
+def test_llm_unavailable_still_propagates_for_the_503_contract():
+    """Containment must not swallow the connectivity failures that
+    `app.api.query` deliberately maps to a 503 (Task 9's fix). Those are an
+    expected operating condition with a designed response, not "unexpected".
+    """
+    import httpx
+    import pytest
+
+    from app.core.errors import LLM_UNAVAILABLE_ERRORS
+
+    assert issubclass(httpx.ConnectTimeout, LLM_UNAVAILABLE_ERRORS)
+    stages = _stages()
+    stages.synthesize.side_effect = httpx.ConnectTimeout("timed out")
+    with pytest.raises(httpx.ConnectTimeout):
+        _pipeline(stages).answer("q", history=[])
+
+
+def test_request_budget_stops_the_retrieval_loop(monkeypatch):
+    """Finding E: `llm_timeout_seconds` bounds ONE completion, but a request
+    makes up to 11 -- a degraded Ollama could hold a worker for ~25 minutes.
+    A wall-clock budget must stop the loops and return something.
+    """
+    monkeypatch.setenv("DOCUMIND_REQUEST_BUDGET_SECONDS", "0")
+    stages = _stages(grades=[[], []])
+    result = _pipeline(stages).answer("q", history=[])
+    assert stages.rewrite.call_count == 1, "budget stops the second attempt"
+    assert result.retrieval_attempts == 1
+    assert "too long" in result.answer.lower()
+    assert result.grounded is None
+
+
+def test_request_budget_returns_the_answer_it_already_has(monkeypatch):
+    """Budget exhaustion mid-generation must ship the answer in hand, not
+    discard it -- the same fail-open instinct as `check()`.
+    """
+    monkeypatch.setenv("DOCUMIND_REQUEST_BUDGET_SECONDS", "0")
+    stages = _stages(verdicts=[False, False])
+    result = _pipeline(stages).answer("q", history=[])
+    assert stages.synthesize.call_count == 1, "budget stops the regeneration"
+    assert result.answer.startswith("answer")
+    assert result.grounded is False
+    assert result.citations and result.citations[0].title == "Doc"
+
+
 def test_history_is_windowed_and_status_messages_emitted():
     stages = _stages()
     history = [{"role": "user", "content": f"m{i}"} for i in range(8)]

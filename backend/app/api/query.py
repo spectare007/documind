@@ -14,49 +14,32 @@ That matters here specifically because Task 12's evaluation harness drives
 `/query` once per golden question against a slow CPU model, so a timeout is
 an expected operating condition, not a rare exceptional one.
 
-`LLM_UNAVAILABLE_ERRORS` below was built empirically, not guessed, against
-the two LLM clients this app actually constructs:
-
-- `SimplePipeline`'s `llama_index.llms.ollama.Ollama` calls Ollama over
-  `httpx` directly and does not catch anything -- pointing it at an
-  unreachable/refusing host and letting it time out raises a raw
-  `httpx.ConnectTimeout` (confirmed via `Ollama(...).complete(...)` against
-  a closed port), which is an `httpx.TransportError` subclass covering
-  every connect/read/write/pool-timeout and connection-refused variant.
-- `AgenticPipeline`'s `crewai.LLM` (see `app.agents.llm.get_crew_llm`)
-  resolves to CrewAI's `OpenAICompatibleCompletion`, which talks to
-  Ollama's OpenAI-compatible endpoint via the `openai` SDK. Both a refused
-  connection and a client-side timeout were confirmed (via `LLM(...).
-  call(...)` against a closed port and against a black-holed address) to
-  surface identically as a plain builtin `ConnectionError` (an `OSError`
-  subclass) -- CrewAI catches `openai.APIConnectionError`/
-  `APITimeoutError` internally and re-raises this instead.
-
-A bare `except Exception` would also swallow real programming errors (a
-`KeyError` in prompt formatting, a Pydantic validation bug) and misreport
-them as "upstream unavailable", which is worse than a 500 because it hides
-the actual defect behind a plausible-sounding wrong diagnosis. Catching
-only this specific, empirically-verified tuple avoids that.
+`LLM_UNAVAILABLE_ERRORS` was built empirically, not guessed, against the two
+LLM clients this app actually constructs; it now lives in `app.core.errors`
+and is re-exported here under its original name. It moved because
+`AgenticPipeline.answer()` gained a catch-all containment layer (so an
+unexpected stage failure returns a friendly result instead of a bare 500),
+and that layer must deliberately *re-raise* these specific errors so this
+handler still sees them and still returns 503. See `app.core.errors` for the
+full derivation and for why the tuple must stay narrow.
 """
 
 import logging
 import time
 from typing import Literal
 
-import httpx
 from fastapi import APIRouter, HTTPException
 from opentelemetry import trace
 from pydantic import BaseModel, field_validator
 
 from app.core.config import get_settings
+from app.core.errors import LLM_UNAVAILABLE_ERRORS
 from app.pipelines.types import Citation, PipelineResult, RetrievedChunk
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["query"])
 
-# See the module docstring's "LLM-unavailable handling" section for how this
-# tuple was derived and verified against the actual installed clients.
-LLM_UNAVAILABLE_ERRORS = (httpx.TransportError, ConnectionError)
+__all__ = ["LLM_UNAVAILABLE_ERRORS", "QueryIn", "QueryOut", "get_pipeline", "query", "router"]
 
 
 class QueryIn(BaseModel):

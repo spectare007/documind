@@ -107,6 +107,50 @@ def test_research_falls_back_to_direct_retrieval_when_tool_unused():
     assert calls[0]["tools"], "researcher must be given the document_search tool"
 
 
+def test_research_does_not_retrieve_twice_when_the_tool_ran_but_found_nothing():
+    """Finding C: `if not buffer` conflated "the agent never searched" with
+    "the agent searched and found nothing", so an empty-result query ran
+    retrieval twice (6 `retrieve()` calls for 3 tool calls). The guard is
+    `tool.current_usage_count == 0`, which CrewAI's `BaseTool.run` increments
+    before `_run` -- so it means "never invoked", nothing else.
+    """
+    from app.agents.tools import DocumentSearchTool
+
+    retriever = _retriever()  # returns no chunks
+    stages = _stages_with_tool_calls(retriever, calls=2)
+    assert stages.research(["q1", "q2"]) == []
+    assert retriever.retrieve.call_count == 2, "the fallback must not fire"
+
+
+def _stages_with_tool_calls(retriever, calls):
+    """CrewStages whose researcher crew invokes the real tool `calls` times."""
+    from app.agents.stages import CrewStages
+
+    stages = CrewStages(llm=MagicMock(), retriever=retriever)
+
+    def kickoff(role, goal, description, expected_output, tools=None):
+        for i in range(calls):
+            tools[0].run(query=f"q{i}")
+        return "searched"
+
+    stages._kickoff = kickoff  # type: ignore[method-assign]
+    return stages
+
+
+def test_research_dedupes_on_doc_id_and_text_not_text_alone():
+    """Minor: identical text in two different documents is two citations."""
+    retriever = MagicMock()
+    same_text = "Total due: 1,452.00 EUR"
+    retriever.retrieve.return_value = [
+        RetrievedChunk(text=same_text, score=0.9, doc_id="doc-a", title="A", pages=[1]),
+        RetrievedChunk(text=same_text, score=0.9, doc_id="doc-b", title="B", pages=[1]),
+        RetrievedChunk(text=same_text, score=0.9, doc_id="doc-a", title="A", pages=[1]),
+    ]
+    stages, _ = _stages(retriever=retriever, outputs=["done"])
+    chunks = stages.research(["q"])
+    assert [c.doc_id for c in chunks] == ["doc-a", "doc-b"]
+
+
 def test_research_survives_a_crew_failure():
     from app.agents.stages import CrewStages
 
@@ -120,11 +164,60 @@ def test_research_survives_a_crew_failure():
     assert [c.text for c in stages.research(["q1"])] == ["x"]
 
 
-def test_grade_numbers_chunks_and_parses_indices():
-    stages, calls = _stages(outputs=["[1]"])
+def test_grade_asks_once_per_chunk_and_keeps_the_yeses():
+    """Ruling A: one binary verdict per chunk, not one JSON-array call.
+
+    qwen2.5:3b answers `[]` to the array form for *every* input once CrewAI
+    appends its expected-output boilerplate; it answers yes/no per chunk
+    correctly (6/6 live). The public signature is unchanged -- still indices
+    into the caller's list.
+    """
+    stages, calls = _stages(outputs=["no", "yes"])
     assert stages.grade("q", [_chunk("first"), _chunk("second")]) == [1]
-    assert "[0] first" in calls[0]["description"]
-    assert "[1] second" in calls[0]["description"]
+    assert len(calls) == 2, "one crew call per chunk"
+    assert "first" in calls[0]["description"] and "second" not in calls[0]["description"]
+    assert "second" in calls[1]["description"]
+
+
+def test_grade_keeps_unparseable_verdicts_failing_open():
+    stages, _ = _stages(outputs=["I am not sure about this one", "no"])
+    assert stages.grade("q", [_chunk("a"), _chunk("b")]) == [0]
+
+
+def test_grade_keeps_a_chunk_whose_crew_raised():
+    from app.agents.stages import CrewStages
+
+    stages = CrewStages(llm=MagicMock(), retriever=_retriever())
+    calls = {"n": 0}
+
+    def flaky(role, goal, description, expected_output, tools=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("crew exploded")
+        return "no"
+
+    stages._kickoff = flaky  # type: ignore[method-assign]
+    # Chunk 0's grading blew up -> kept rather than silently dropped.
+    assert stages.grade("q", [_chunk("a"), _chunk("b")]) == [0]
+
+
+def test_grade_respects_a_unanimous_no():
+    stages, _ = _stages(outputs=["no", "no"])
+    assert stages.grade("q", [_chunk("a"), _chunk("b")]) == []
+
+
+def test_grade_caps_the_number_of_chunks_and_prefers_high_scores():
+    """Ruling A: bounded on CPU -- at most retrieval_top_k chunks, highest
+    scoring first, and the returned indices still address the caller's list.
+    """
+    stages, calls = _stages(outputs=["yes"] * 10)
+    chunks = [_chunk(f"c{i}") for i in range(10)]
+    chunks[7].score = 0.99  # highest
+    chunks[3].score = 0.98
+    kept = stages.grade("q", chunks)
+    assert len(calls) == 6, "retrieval_top_k defaults to 6"
+    assert 7 in kept and 3 in kept
+    assert kept == sorted(kept) and all(0 <= i < 10 for i in kept)
 
 
 def test_synthesize_includes_context_and_feedback():

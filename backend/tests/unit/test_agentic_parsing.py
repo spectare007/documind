@@ -13,6 +13,11 @@ def test_parse_route():
     assert parse_route("rag") == "rag"
     assert parse_route(" Direct.\n") == "direct"
     assert parse_route("gibberish") == "rag"  # safe default: retrieve
+    # Anchored, not a substring search: a sentence that merely mentions the
+    # word must not flip the route away from retrieval.
+    assert parse_route("This is not a direct question") == "rag"
+    assert parse_route("The answer is indirect") == "rag"
+    assert parse_route("DIRECT") == "direct"
 
 
 def test_parse_queries():

@@ -30,6 +30,16 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 6
     max_retrieval_attempts: int = 2
     max_generation_attempts: int = 2
+    # Whole-request wall-clock budget for the agentic pipeline.
+    # `llm_timeout_seconds` bounds a *single* completion, but one agentic
+    # request makes up to 11 of them (router, 2x rewriter, 2x researcher,
+    # up to 6 grader verdicts, 2x synthesizer, 2x checker), so a degraded
+    # Ollama could hold a worker for ~25 minutes without this. Checked at
+    # stage boundaries: it stops the pipeline starting *more* work and
+    # returns the best result it already has -- it cannot interrupt a
+    # completion already in flight, which is what `llm_timeout_seconds`
+    # is for.
+    request_budget_seconds: float = 300.0
 
     # Ingestion
     data_dir: Path = Path("data/documents")

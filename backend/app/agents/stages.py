@@ -23,6 +23,7 @@ from crewai import Agent, Crew, Process, Task
 
 from app.agents.llm import get_crew_llm
 from app.agents.tools import DocumentSearchTool
+from app.core.config import get_settings
 from app.observability.prompts import get_prompt_manager
 from app.pipelines.simple import format_context
 from app.pipelines.types import RetrievedChunk
@@ -46,8 +47,15 @@ MAX_REWRITTEN_QUERIES = 3
 
 
 def parse_route(text: str) -> str:
-    """`"direct"` only on an explicit direct signal; anything else retrieves."""
-    return "direct" if "direct" in text.strip().lower() else "rag"
+    """`"direct"` only on an explicit direct signal; anything else retrieves.
+
+    Anchored to the start of the reply rather than a substring search: the
+    router is asked for one word, so a model that answers in a sentence
+    ("this is not a direct question") must not flip the route away from
+    retrieval on the strength of a passing mention. `\\b` also stops
+    "indirect" from matching.
+    """
+    return "direct" if re.match(r"\W*direct\b", text.strip().lower()) else "rag"
 
 
 def _extract_json_array(text: str) -> list | None:
@@ -76,7 +84,14 @@ def parse_queries(text: str, fallback: str = "") -> list[str]:
 
 
 def parse_indices(text: str, n_chunks: int) -> list[int]:
-    """Relevant chunk indices, failing open on a malformed grader reply.
+    """Relevant chunk indices from a JSON-array reply, failing open.
+
+    NOTE: `grade()` no longer calls this -- it now asks for one binary
+    verdict per chunk (see its docstring for the measurements that forced
+    that change) and uses `parse_verdict`. This stays as a public, tested
+    parse helper for any caller that does get an array-of-indices reply
+    (e.g. Task 12's evaluation harness scoring a larger model, which handles
+    the array form fine); it is the only parser here that reads one.
 
     Three cases, and the distinction between the last two matters:
 
@@ -130,6 +145,7 @@ class CrewStages:
         self.llm = llm or get_crew_llm()
         self.retriever = retriever or HybridRetriever()
         self.prompts = get_prompt_manager()
+        self.settings = get_settings()
 
     def _kickoff(self, role: str, goal: str, description: str,
                  expected_output: str, tools: list | None = None) -> str:
@@ -183,21 +199,83 @@ class CrewStages:
                           description, "one-line summary", tools=[tool])
         except Exception as exc:
             logger.warning("researcher crew failed (%s); falling back to direct retrieval", exc)
-        if not buffer:
-            logger.info("researcher produced no tool results; retrieving directly")
+        # `current_usage_count` is incremented by CrewAI's `BaseTool.run`
+        # *before* it delegates to `_run`, so 0 means "the tool was never
+        # invoked" and nothing else. Guarding on `not buffer` instead
+        # conflated that with "the agent searched and found nothing", and so
+        # re-ran every query through the retriever a second time on any
+        # empty-result question -- doubling the embedding calls for the most
+        # common failure case. A crew that died before its first tool call
+        # still has count 0, so the crew-failure fallback keeps working.
+        if tool.current_usage_count == 0:
+            logger.info("researcher never called document_search; retrieving directly")
             for q in queries:
                 buffer.extend(self.retriever.retrieve(q))
-        seen: set[str] = set()
-        unique = [c for c in buffer if not (c.text in seen or seen.add(c.text))]
+        # Deduplicate on (doc_id, text): identical text in two different
+        # documents is two real citations, and collapsing on text alone
+        # silently dropped one of them.
+        seen: set[tuple[str, str]] = set()
+        unique = [c for c in buffer
+                  if not ((c.doc_id, c.text) in seen or seen.add((c.doc_id, c.text)))]
         logger.info("research stage: %d queries -> %d unique chunks", len(queries), len(unique))
         return unique
 
     def grade(self, question: str, chunks: list[RetrievedChunk]) -> list[int]:
-        numbered = "\n\n".join(f"[{i}] {c.text}" for i, c in enumerate(chunks))
-        out = self._kickoff("Relevance Grader", "Judge context strictly",
-                            self.prompts.get("grader", question=question, chunks=numbered),
-                            "JSON array of relevant chunk numbers")
-        return parse_indices(out, n_chunks=len(chunks))
+        """Indices of the chunks worth answering from -- one binary verdict
+        per chunk, single-token output.
+
+        This is deliberately N cheap calls rather than one clever call. The
+        JSON-array form ("reply with [0, 2]") is unusable on a 3B model once
+        CrewAI appends its expected-output boilerplate to the task: measured
+        live, qwen2.5:3b answered `[]` to *every* input -- relevant chunk,
+        irrelevant chunk, no chunk -- which made the whole pipeline say "I
+        couldn't find anything" for a corpus that did contain the answer.
+        Four rewordings of the criteria line and a rewritten template did not
+        move it. The same model on the same content answers yes/no per chunk
+        correctly (6/6 live, including both true-positive and true-negative
+        cases), because one token about one passage is the easiest possible
+        task for a small model.
+
+        Bounded on purpose: at most `retrieval_top_k` chunks are graded,
+        highest-scoring first, so a broad retrieval cannot turn one request
+        into a dozen sequential CPU completions. Returned indices always
+        address the *caller's* list, so the signature and semantics are
+        unchanged from the array version.
+
+        Fails open per chunk, reusing `parse_verdict`'s convention: only an
+        explicit "no" drops a chunk, so an unreadable reply (or a crew that
+        raised outright) keeps it. An empty result therefore means every
+        graded chunk was explicitly rejected -- a real judgment, which is
+        what drives the corrective retrieval retry -- and can never be an
+        artifact of a model answering off-format.
+        """
+        if not chunks:
+            return []
+        limit = self.settings.retrieval_top_k
+        ranked = sorted(range(len(chunks)), key=lambda i: chunks[i].score, reverse=True)
+        graded = ranked[:limit]
+        if len(ranked) > limit:
+            logger.info(
+                "grading top %d of %d chunks by score (retrieval_top_k=%d)",
+                len(graded), len(chunks), limit,
+            )
+
+        keep: list[int] = []
+        for i in graded:
+            try:
+                out = self._kickoff(
+                    "Relevance Grader", "Judge each piece of context on its own",
+                    self.prompts.get("grader", question=question, chunk=chunks[i].text),
+                    "one word: yes or no",
+                )
+            except Exception as exc:
+                logger.warning("grading chunk %d failed (%s); keeping it", i, exc)
+                keep.append(i)
+                continue
+            if parse_verdict(out):
+                keep.append(i)
+        logger.info("grade stage: kept %d of %d graded chunk(s)", len(keep), len(graded))
+        return sorted(keep)
 
     def synthesize(self, question: str, chunks: list[RetrievedChunk], feedback: str) -> str:
         fb = f"\nIMPORTANT: {feedback}" if feedback else ""

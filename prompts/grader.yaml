@@ -1,14 +1,14 @@
 name: grader
-version: 1
-description: Grade retrieved chunks for relevance to the question.
+version: 2
+description: Grade a single retrieved chunk for relevance to the question (binary verdict).
 template: |
-  You are a strict relevance grader. For each numbered context chunk below,
-  decide if it helps answer the question.
+  You are a relevance grader. Decide whether the context below contains
+  information that helps answer the question. It does not have to answer the
+  question completely -- partial or supporting information counts.
 
   Question: {question}
 
-  Chunks:
-  {chunks}
+  Context:
+  {chunk}
 
-  Reply ONLY with a JSON array of the numbers of relevant chunks, e.g. [0, 2].
-  Reply [] if none are relevant.
+  Reply with exactly one word: yes if this context helps, no if it does not.

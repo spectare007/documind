@@ -9,6 +9,7 @@ def test_defaults():
     assert s.embed_dim == 768
     assert s.pipeline_mode == "agentic"
     assert s.max_retrieval_attempts == 2
+    assert s.request_budget_seconds == 300.0
     assert s.data_dir == Path("data/documents")
 
 
