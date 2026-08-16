@@ -10,9 +10,15 @@ THREE INDEPENDENT WAYS THIS CANNOT RUN AWAY OR FAIL CLOSED:
 
 1. *Attempt bounds.* Both corrective loops are bounded by settings
    (`max_retrieval_attempts`, `max_generation_attempts`, both 2): one attempt
-   plus at most one correction. Exhausting retrieval returns the honest
-   "nothing found" answer; exhausting generation still returns the answer
-   with `grounded=False`, so the caller can flag it rather than show nothing.
+   plus at most one correction. Exhausting retrieval with nothing retrieved
+   at all returns the honest "nothing found" answer; if retrieval *did* find
+   chunks but the grader rejected every one, the pipeline instead fails open
+   to the top-`retrieval_top_k` retrieved chunks by score rather than
+   refusing (see the grader-fallback block in `_answer`) -- the grader is a
+   3B classifier, and discarding retrieval's ranked output on its say-so
+   loses more than it protects. Exhausting generation still returns the
+   answer with `grounded=False`, so the caller can flag it rather than show
+   nothing.
 
 2. *A wall-clock budget* (`request_budget_seconds`, default 300). Attempt
    bounds alone do not bound *time*: `llm_timeout_seconds` caps a single
@@ -71,6 +77,9 @@ _UNGROUNDED_FEEDBACK = (
     "Your previous answer contained claims not supported by the context. "
     "Use only facts from the context."
 )
+_GRADER_FALLBACK_STATUS = (
+    "Relevance grader rejected all matches; falling back to top retrieved results…"
+)
 
 
 class AgenticPipeline:
@@ -128,6 +137,7 @@ class AgenticPipeline:
         feedback = ""
         attempts = 0
         budget_hit = False
+        last_retrieved: list[RetrievedChunk] = []
         for attempt in range(self.settings.max_retrieval_attempts):
             # The first attempt always runs: returning without having tried
             # to retrieve anything is worse than being slow.
@@ -142,12 +152,50 @@ class AgenticPipeline:
             if not all_chunks:
                 feedback = _NO_MATCH_FEEDBACK
                 continue
+            last_retrieved = all_chunks
             notify("Grading context…")
             keep = self.stages.grade(question, all_chunks)
             relevant = [all_chunks[i] for i in keep]
             if relevant:
                 break
             feedback = _IRRELEVANT_FEEDBACK
+
+        # Fail-open grader fallback. This runs only once the corrective
+        # retrieval loop above has been given its full, configured chance
+        # (both attempts, or a genuine budget cutoff) -- it never
+        # short-circuits the retry.
+        #
+        # `last_retrieved` is only ever set from a non-empty `all_chunks`, so
+        # reaching here with it populated means: retrieval *did* find
+        # candidates -- `HybridRetriever` already ranked them by hybrid
+        # (dense + sparse) relevance -- but the grader (a 3B classifier
+        # running a binary yes/no judgment per chunk, see
+        # `app.agents.stages.CrewStages.grade`) rejected every single one.
+        # Discarding all of retrieval's ranked output on that classifier's
+        # say-so throws away the system's best signal. Rather than refuse,
+        # fall back to the top-`retrieval_top_k` chunks by retrieval score
+        # and let synthesis attempt an answer from them.
+        #
+        # This does not weaken the system's correctness net: the
+        # synthesizer is still instructed to answer only from the given
+        # context and say so when it cannot, and `_check()`'s groundedness
+        # verification still runs against the same chunks afterward. Both
+        # already demonstrated they catch genuinely unanswerable questions
+        # without this fallback's help (2/2 correctly refused in the
+        # evaluation run that motivated this fallback) -- the grader was
+        # the one component discarding good, relevant context.
+        grader_fallback = False
+        if not relevant and not budget_hit and last_retrieved:
+            grader_fallback = True
+            relevant = sorted(
+                last_retrieved, key=lambda c: c.score, reverse=True
+            )[: self.settings.retrieval_top_k]
+            logger.info(
+                "grader rejected all %d retrieved chunk(s) after %d retrieval "
+                "attempt(s); falling back to top %d by retrieval score",
+                len(last_retrieved), attempts, len(relevant),
+            )
+            notify(_GRADER_FALLBACK_STATUS)
 
         if not relevant:
             logger.info("no relevant context after %d retrieval attempt(s)", attempts)
@@ -179,6 +227,7 @@ class AgenticPipeline:
             answer=answer, citations=build_citations(relevant), chunks=relevant,
             grounded=grounded, route="rag",
             retrieval_attempts=attempts, generation_attempts=gen_attempts,
+            grader_fallback=grader_fallback,
         )
 
     def _check(self, answer: str, chunks: list[RetrievedChunk]) -> bool:

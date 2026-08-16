@@ -34,6 +34,12 @@ class PipelineResult(BaseModel):
     route: str = "rag"
     retrieval_attempts: int = 0
     generation_attempts: int = 0
+    # True when the relevance grader rejected every retrieved chunk but the
+    # pipeline still proceeded to synthesis using the top-scored retrieved
+    # chunks instead of refusing. See `app.pipelines.agentic` for the
+    # rationale. Additive/defaulted -- Task 11 and Task 12 construct
+    # `PipelineResult` without this field and must keep working.
+    grader_fallback: bool = False
 
 
 StatusCallback = Callable[[str], None]
