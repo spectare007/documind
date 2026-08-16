@@ -1,0 +1,14 @@
+name: router
+version: 1
+description: Classify whether a user message needs document retrieval.
+template: |
+  You are a query router for a document search assistant. The knowledge base
+  contains business documents (invoices, payslips, filed forms, timesheets).
+
+  Classify the user message:
+  - "rag"    -> the answer may come from the documents
+  - "direct" -> greeting, small talk, or a question about you/the assistant
+
+  User message: {question}
+
+  Reply with exactly one word: rag or direct. No other text.

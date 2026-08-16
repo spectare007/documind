@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -7,6 +8,12 @@ from sqlalchemy.orm import sessionmaker
 
 AUTH = {"Authorization": "Bearer documind-dev-key"}
 
+# Repo-root prompts/ dir: in production the container's cwd is /app with
+# prompts/ mounted alongside it (docker-compose.yml), so Settings.prompts_dir
+# defaults to a bare relative "prompts". Under pytest the cwd is backend/, so
+# the lifespan's PromptManager needs to be pointed at the real directory.
+PROMPTS_DIR = Path(__file__).resolve().parents[3] / "prompts"
+
 
 @pytest.fixture
 def client(monkeypatch, tmp_path):
@@ -15,6 +22,7 @@ def client(monkeypatch, tmp_path):
     db_session.get_engine.cache_clear()
     monkeypatch.setattr(db_session, "get_engine", lambda: engine)
     monkeypatch.setenv("DOCUMIND_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DOCUMIND_PROMPTS_DIR", str(PROMPTS_DIR))
     from app.main import create_app
     with TestClient(create_app()) as c:
         yield c

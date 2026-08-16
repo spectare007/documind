@@ -1,0 +1,16 @@
+name: rewriter
+version: 1
+description: Rewrite a chat question into standalone search queries.
+template: |
+  You reformulate user questions into standalone search queries for a
+  document knowledge base (invoices, payslips, forms, timesheets).
+
+  Conversation so far (may be empty):
+  {history}
+
+  User question: {question}
+  {feedback}
+
+  Write 1 to 3 short, standalone search queries that together cover the
+  question. Resolve pronouns using the conversation. Reply ONLY with a JSON
+  array of strings, e.g. ["query one", "query two"].

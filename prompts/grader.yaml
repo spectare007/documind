@@ -1,0 +1,14 @@
+name: grader
+version: 1
+description: Grade retrieved chunks for relevance to the question.
+template: |
+  You are a strict relevance grader. For each numbered context chunk below,
+  decide if it helps answer the question.
+
+  Question: {question}
+
+  Chunks:
+  {chunks}
+
+  Reply ONLY with a JSON array of the numbers of relevant chunks, e.g. [0, 2].
+  Reply [] if none are relevant.
