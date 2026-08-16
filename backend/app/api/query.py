@@ -2,7 +2,7 @@
 
 Dispatches to whichever pipeline (`simple` naive baseline or `agentic`
 self-correcting graph) `mode` selects, so it can serve both live product
-queries and the RAGAs evaluation harness (Task 12) against the same
+queries and the RAGAs evaluation harness against the same
 contract.
 
 --- LLM-unavailable handling (fix for a review finding) ---
@@ -10,7 +10,7 @@ contract.
 Neither pipeline wraps its own LLM call, so a connection failure or a
 `llm_timeout_seconds` timeout used to propagate out of this handler as
 FastAPI's generic unhandled 500 -- no structured body, no route-level log.
-That matters here specifically because Task 12's evaluation harness drives
+That matters here specifically because the RAGAs evaluation harness drives
 `/query` once per golden question against a slow CPU model, so a timeout is
 an expected operating condition, not a rare exceptional one.
 

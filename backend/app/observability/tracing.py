@@ -4,7 +4,8 @@ Registers an OpenTelemetry TracerProvider that exports spans to Arize
 Phoenix over OTLP-HTTP under the `documind` project, then attempts to attach
 OpenInference/OpenTelemetry auto-instrumentation for FastAPI (the ASGI
 request layer), CrewAI, LlamaIndex, LiteLLM and the OpenAI SDK, so both
-inbound HTTP requests and agent/LLM calls (Tasks 9-11) show up as spans
+inbound HTTP requests and agent/LLM calls (the OpenAI-compatible chat API,
+the agentic pipeline, and the streaming/chat layer) show up as spans
 automatically.
 
 WHY BOTH LiteLLM *AND* OpenAI INSTRUMENTORS (fix for a review finding):

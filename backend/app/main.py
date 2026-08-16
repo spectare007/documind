@@ -40,7 +40,10 @@ def create_app() -> FastAPI:
     )
     from app.core.middleware import CorrelationIdMiddleware
     app.add_middleware(CorrelationIdMiddleware)
-    try:  # tracing is best-effort (real impl in Task 8)
+    # Tracing setup is best-effort: it must never block startup or fail app
+    # creation if Phoenix is unreachable or the tracing module is
+    # unavailable (see app.observability.tracing for the full rationale).
+    try:
         # Must run here -- synchronously, before this function returns --
         # rather than inside `lifespan()`. Starlette caches
         # `self.middleware_stack` on the app's very first ASGI call, which

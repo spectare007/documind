@@ -90,7 +90,7 @@ def parse_indices(text: str, n_chunks: int) -> list[int]:
     verdict per chunk (see its docstring for the measurements that forced
     that change) and uses `parse_relevance_verdict`. This stays as a public, tested
     parse helper for any caller that does get an array-of-indices reply
-    (e.g. Task 12's evaluation harness scoring a larger model, which handles
+    (e.g. the RAGAs evaluation harness scoring a larger model, which handles
     the array form fine); it is the only parser here that reads one.
 
     Three cases, and the distinction between the last two matters:

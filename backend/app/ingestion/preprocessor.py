@@ -15,7 +15,7 @@ _converter: DocumentConverter | None = None
 
 # Guards both the lazy construction of the shared DocumentConverter and every convert()
 # call made through it. DocumentConverter.convert() is not documented thread-safe, and
-# ingestion jobs (Task 6) each run on their own thread, so PDF conversion is fully
+# ingestion jobs each run on their own thread, so PDF conversion is fully
 # serialised here: a single shared converter used one document at a time is the right
 # trade for this project, since correctness matters far more than ingestion throughput.
 # Re-entrant so parse_pdf() can hold the lock across both the lazy-init check and the

@@ -27,4 +27,4 @@ No screenshots are included in this submission; none were fabricated. The deck d
 
 ## Where the numbers come from
 
-Every number cited in the deck (chunk counts, latencies, span/token counts, test counts) was measured against the live stack and is recorded in `.superpowers/sdd/2026-08-16-documind-implementation/progress.md`. The evaluation slide quotes the final, full 25-question sweep against the real corpus from `doc/evaluation-report.md`, not the RAGAs metric run over a 5-question subset that was recorded earlier and is kept in that report for its metric detail only (see that report's Part 2 warning).
+Every number cited in the deck (chunk counts, latencies, span/token counts, test counts) was measured against the live stack during development. The evaluation slide quotes the final, full 25-question sweep against the real corpus from `doc/evaluation-report.md`, not the RAGAs metric run over a 5-question subset that was recorded earlier and is kept in that report for its metric detail only (see that report's Part 2 warning).

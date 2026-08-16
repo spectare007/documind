@@ -3,8 +3,8 @@
 Exposes `GET /v1/models` and `POST /v1/chat/completions` so any
 OpenAI-client-compatible frontend (OpenWebUI in particular) can drive the
 agentic RAG pipeline as if it were talking to a normal chat model. This is a
-thin adapter over `app.api.query.get_pipeline` / `PipelineResult` (Task 9) --
-it does not re-implement any pipeline logic.
+thin adapter over `app.api.query.get_pipeline` / `PipelineResult` -- it does
+not re-implement any pipeline logic.
 
 --- Streaming status updates ---
 
@@ -152,7 +152,8 @@ def _get_stream_executor() -> ThreadPoolExecutor:
     ...)` call in the app also draws from). A `pipeline.answer()` already
     executing on a worker thread cannot be interrupted mid-LLM-call, so a
     client that disconnects mid-stream leaves its run occupying a thread
-    until it finishes or `request_budget_seconds` (Task 10) gives up on it.
+    until it finishes or the agentic pipeline's `request_budget_seconds`
+    wall-clock budget gives up on it.
     Isolating that thread pool means repeated aborts can only ever exhaust
     *this* endpoint's capacity, never starve DB writes, ingestion, or other
     request handling that shares the default pool. Sized via
@@ -332,7 +333,7 @@ async def chat_completions(body: ChatCompletionRequest):
                 # the done-callback is attached unconditionally rather than
                 # only in the "didn't cancel" branch. This is what accounts
                 # for the run instead of leaking it silently; the pipeline's
-                # own request_budget_seconds wall-clock cap (Task 10) bounds
+                # own request_budget_seconds wall-clock cap bounds
                 # how much longer an in-flight run can occupy its thread with
                 # nobody left to consume the result.
                 really_cancelled = raw_future.cancel()

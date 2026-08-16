@@ -32,3 +32,7 @@ Thumbs.db
 
 # Evaluation run outputs (reports are committed from doc/, raw runs are not)
 evaluation/runs/
+
+# Internal working notes (specs/plans/session state), not project deliverables
+docs/
+.superpowers/

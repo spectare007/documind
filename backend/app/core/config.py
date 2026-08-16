@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # is for.
     request_budget_seconds: float = 300.0
 
-    # Chat streaming (Task 11 fix round 1): bounded, dedicated thread pool
+    # Chat streaming: bounded, dedicated thread pool
     # for agentic pipeline runs kicked off by the streaming
     # /v1/chat/completions endpoint (see
     # app.api.openai_compat._get_stream_executor). Kept separate from

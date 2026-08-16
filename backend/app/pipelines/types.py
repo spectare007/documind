@@ -1,9 +1,9 @@
 """Shared pipeline result types.
 
-Consumed verbatim by the agentic pipeline (Task 10), the streaming/chat layer
-(Task 11) and the RAGAs evaluation harness (Task 12) -- field names and types
-here are a stable contract; do not rename or add required fields without
-updating all three.
+Consumed verbatim by the agentic pipeline (`app.pipelines.agentic`), the
+streaming/chat layer (`app.api.openai_compat`) and the RAGAs evaluation
+harness -- field names and types here are a stable contract; do not rename
+or add required fields without updating all three.
 """
 
 from collections.abc import Callable

@@ -5,7 +5,7 @@ import app.ingestion.preprocessor as preprocessor
 
 def test_get_converter_initializes_once_under_concurrent_access(monkeypatch):
     """`_get_converter()` must construct the shared DocumentConverter exactly once even
-    when many threads race to initialise it (Task 6 spawns one thread per ingest job)."""
+    when many threads race to initialise it (each ingest job runs on its own thread)."""
 
     init_calls: list[int] = []
     init_calls_lock = threading.Lock()

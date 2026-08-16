@@ -91,7 +91,8 @@ def test_failing_check_fails_open_and_keeps_the_answer():
 
 def test_unexpected_stage_failure_returns_a_result_not_an_exception():
     """Finding D: an unexpected stage exception used to escape as a bare 500,
-    and in Task 11 would abort a stream mid-flight with no message.
+    and in the streaming/chat layer would abort a stream mid-flight with no
+    message.
     """
     stages = _stages()
     stages.synthesize.side_effect = RuntimeError("boom")
@@ -103,8 +104,8 @@ def test_unexpected_stage_failure_returns_a_result_not_an_exception():
 
 def test_llm_unavailable_still_propagates_for_the_503_contract():
     """Containment must not swallow the connectivity failures that
-    `app.api.query` deliberately maps to a 503 (Task 9's fix). Those are an
-    expected operating condition with a designed response, not "unexpected".
+    `app.api.query` deliberately maps to a 503. Those are an expected
+    operating condition with a designed response, not "unexpected".
     """
     import httpx
     import pytest

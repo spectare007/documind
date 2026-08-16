@@ -27,8 +27,8 @@ THREE INDEPENDENT WAYS THIS CANNOT RUN AWAY OR FAIL CLOSED:
 3. *Exception containment.* Any unexpected stage failure returns a
    `PipelineResult` carrying a friendly message and `grounded=None` instead
    of propagating: an escaped exception is a bare HTTP 500 today, and in the
-   streaming layer (Task 11) it would abort a response mid-flight with
-   nothing written. The one deliberate exception is
+   streaming/chat layer (`app.api.openai_compat`) it would abort a response
+   mid-flight with nothing written. The one deliberate exception is
    `LLM_UNAVAILABLE_ERRORS`, which is re-raised so `app.api.query` can still
    turn it into a structured 503 -- upstream being down is an expected
    condition with a designed response, not an unexpected failure. `check()`
@@ -90,7 +90,8 @@ class AgenticPipeline:
         """Answer `question`. Never raises except for upstream unavailability.
 
         See the module docstring for the three independent bounds. The
-        signature is fixed: Task 11 calls this positionally.
+        signature is fixed: `app.api.openai_compat`'s streaming/chat layer
+        calls this positionally.
         """
         try:
             return self._answer(question, history, on_status)

@@ -1,9 +1,9 @@
 """Naive (non-agentic) RAG pipeline: retrieve then synthesize.
 
-This is also the RAGAs evaluation baseline (Task 12) that the agentic
-pipeline (Task 10) is compared against, so its behavior must stay simple and
-deterministic: a single retrieval pass, a single generation pass, no
-grading, no rewriting, no self-correction loop.
+This is also the RAGAs evaluation baseline that the agentic pipeline
+(`app.pipelines.agentic`) is compared against, so its behavior must stay
+simple and deterministic: a single retrieval pass, a single generation
+pass, no grading, no rewriting, no self-correction loop.
 """
 
 import logging
