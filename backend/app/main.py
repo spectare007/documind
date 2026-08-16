@@ -34,6 +34,8 @@ def create_app() -> FastAPI:
         description="Agentic RAG document search platform",
         lifespan=lifespan,
     )
+    from app.core.middleware import CorrelationIdMiddleware
+    app.add_middleware(CorrelationIdMiddleware)
     from app.api import documents, health, ingest
     app.include_router(health.router)
     protected = [Depends(require_api_key)]
