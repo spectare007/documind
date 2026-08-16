@@ -94,7 +94,7 @@ curl http://localhost:8000/api/v1/ingest/<job_id> -H "Authorization: Bearer <you
 
 **Expected latency (CPU, no GPU):** this is the part most likely to look "stuck" if you don't know what to expect.
 
-- **Agentic mode** (`DOCUMIND_PIPELINE_MODE=agentic`, the default): a full answer runs the crew's six stages, some of which loop. Measured live against the real ingested corpus: the crew graph itself completes in ~29 seconds, ~37 seconds end to end over HTTP. Typical case is 5-8 LLM completions; the per-chunk relevance grader can add up to `retrieval_top_k` (default 6) more single-token completions on top of that if a correction loop fires. This is the flagship pipeline: the user requirement was explicitly to trade latency for agentic depth (full corrective crew, not a leaner one) rather than optimize for speed. See `doc/design-decisions.md` for that decision.
+- **Agentic mode** (`DOCUMIND_PIPELINE_MODE=agentic`, the default): a full answer runs the crew's six stages, some of which loop. Measured live against the real ingested corpus: the crew graph itself completes in ~29 seconds, ~37 seconds end to end over HTTP. Typical case is 5-8 LLM completions; the per-chunk relevance grader can add up to `retrieval_top_k` (default 6) more single-token completions on top of that if a correction loop fires. This is the pipeline the assessment is built around: the user requirement was explicitly to trade latency for agentic depth (full corrective crew, not a leaner one) rather than optimize for speed. See `doc/design-decisions.md` for that decision.
 - **Simple mode** (`DOCUMIND_PIPELINE_MODE=simple`, or `"mode": "simple"` per request on `/api/v1/query`): retrieve once, synthesize once, no grading or self-correction. Measured live: ~25 seconds for a real question against the ingested corpus. This is both the fast-path escape hatch and the "naive RAG" baseline the evaluation report compares the agentic pipeline against.
 - The chat UI streams stage-status updates ("Routing...", "Retrieving...", "Grading context...") inside a collapsible "thinking" panel while the agentic pipeline runs, specifically so a 30-60 second wait doesn't look like a hang.
 - None of the above is a timeout misconfiguration: it is real CPU inference time for a 3B generation model doing several sequential completions. If you have a GPU-backed Ollama, point `DOCUMIND_OLLAMA_BASE_URL` at it and latency drops accordingly; nothing else in the design assumes CPU.
@@ -121,6 +121,7 @@ Every setting is a `DOCUMIND_`-prefixed environment variable (via `pydantic-sett
 | `DOCUMIND_MAX_RETRIEVAL_ATTEMPTS` | `2` | Bound on the rewrite-retrieve-grade loop: one attempt plus at most one correction. |
 | `DOCUMIND_MAX_GENERATION_ATTEMPTS` | `2` | Bound on the synthesize-check loop: one attempt plus at most one regeneration. |
 | `DOCUMIND_REQUEST_BUDGET_SECONDS` | `300.0` | Whole-request wall-clock budget for agentic mode. Stops the pipeline from starting more work once exhausted and returns the best result it already has; cannot interrupt a completion already in flight (that's `LLM_TIMEOUT_SECONDS`'s job). |
+| `DOCUMIND_CHAT_STREAM_MAX_WORKERS` | `4` | Size of the dedicated thread pool that runs agentic pipeline calls for the streaming `/v1/chat/completions` endpoint, kept separate from the shared default executor so an aborted stream can only ever starve this one endpoint, not the rest of the app. |
 | `DOCUMIND_DATA_DIR` | `data/documents` | Directory scanned for PDFs to ingest. Relative to the process's working directory; see the Development section for what that means when running the backend outside Docker. |
 | `DOCUMIND_PROMPTS_DIR` | `prompts` | Directory of YAML prompt templates. Same relative-path caveat as above. |
 | `DOCUMIND_CHUNK_MAX_TOKENS` | `512` | Max tokens per chunk when Docling's `HybridChunker` splits a document. |
@@ -237,8 +238,8 @@ documind/
 
 ## 9. Documentation index
 
-- **[doc/architecture.md](doc/architecture.md)** — system context, ingestion flow, the agentic pipeline's state machine and its bounded correction loops, and the Postgres data model, all as Mermaid diagrams reflecting the implemented code.
-- **[doc/api.md](doc/api.md)** — every endpoint: method, path, auth, real request/response shapes, error codes.
-- **[doc/openapi.json](doc/openapi.json)** — the raw OpenAPI 3 schema, exported from the running FastAPI app; authoritative if it ever disagrees with the hand-written docs.
-- **[doc/design-decisions.md](doc/design-decisions.md)** — ADR-style write-ups of the decisions that shaped this build, including several made mid-implementation once the mandated stack's actual behavior on CPU became clear.
-- **doc/evaluation-report.md** — RAGAs results and the agentic-vs-naive latency/quality comparison. Produced by `scripts/evaluate.py`; may be committed in a separate step from the rest of this documentation set.
+- **[doc/architecture.md](doc/architecture.md)**: system context, ingestion flow, the agentic pipeline's state machine and its bounded correction loops, and the Postgres data model, all as Mermaid diagrams reflecting the implemented code.
+- **[doc/api.md](doc/api.md)**: every endpoint, its method, path, auth, real request/response shapes, and error codes.
+- **[doc/openapi.json](doc/openapi.json)**: the raw OpenAPI 3 schema, exported from the running FastAPI app. Authoritative if it ever disagrees with the hand-written docs.
+- **[doc/design-decisions.md](doc/design-decisions.md)**: ADR-style write-ups of the decisions that shaped this build, including several made mid-implementation once the mandated stack's actual behavior on CPU became clear.
+- **doc/evaluation-report.md**: RAGAs results and the agentic-vs-naive latency/quality comparison. Produced by `scripts/evaluate.py`; may be committed in a separate step from the rest of this documentation set.
