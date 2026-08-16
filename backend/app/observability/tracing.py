@@ -214,6 +214,37 @@ def _instrument_fastapi_app(app: "FastAPI", tracer_provider) -> None:
         logger.warning("fastapi instrumentation failed for this app: %s", exc)
 
 
+def _trace_config():
+    """Build the OpenInference `TraceConfig` that honors `Settings.trace_content`.
+
+    Fix for a review finding: the corpus here is real personal financial
+    documents (payslips, invoices, a filed tax form), and Phoenix's
+    `phoenix_data` volume had no retention policy and no way to turn content
+    capture off. Rather than inventing a bespoke redaction layer, this uses
+    OpenInference's own supported masking mechanism (`openinference-
+    instrumentation`'s `TraceConfig`, passed as each instrumentor's `config`
+    kwarg -- see every call site below): when `trace_content` is False,
+    `hide_inputs`/`hide_outputs` redact LLM prompts, completions and every
+    generic input/output span value (which is where retrieved chunk text
+    surfaces on retriever/chain spans), and `hide_embeddings_text` redacts
+    the raw text sent to the embedding model. None of that touches span
+    names, timings, status, or the token-count attributes
+    (`llm.token_count.*`), which live on separate attributes `TraceConfig`
+    never masks -- so span structure, timings and token counts are exported
+    either way. Called fresh by each instrumentor closure below (not cached)
+    so a `Settings` change under test (or via a future admin reload) is
+    picked up without restarting the process.
+    """
+    from openinference.instrumentation import TraceConfig
+
+    capture = get_settings().trace_content
+    return TraceConfig(
+        hide_inputs=not capture,
+        hide_outputs=not capture,
+        hide_embeddings_text=not capture,
+    )
+
+
 def _process_wide_instrumentors():
     """Yield (name, instrument_fn) pairs for the one-shot, process-wide
     OpenInference instrumentors (everything except FastAPI/ASGI, which is
@@ -221,28 +252,35 @@ def _process_wide_instrumentors():
 
     Imports happen lazily and per-instrumentor so that one package being
     absent or incompatible with the installed CrewAI/LlamaIndex/LiteLLM
-    version can't prevent the others from being attempted.
+    version can't prevent the others from being attempted. Each closure
+    still takes only `tracer_provider` -- matching the pre-existing,
+    tested one-argument contract (see
+    `test_one_failing_instrumentor_does_not_disable_the_others`) -- and
+    resolves the content-capture `TraceConfig` internally via
+    `_trace_config()` rather than taking it as a second parameter.
     """
 
     def _crewai(tracer_provider):
         from openinference.instrumentation.crewai import CrewAIInstrumentor
 
-        CrewAIInstrumentor().instrument(tracer_provider=tracer_provider)
+        CrewAIInstrumentor().instrument(tracer_provider=tracer_provider, config=_trace_config())
 
     def _llama_index(tracer_provider):
         from openinference.instrumentation.llama_index import LlamaIndexInstrumentor
 
-        LlamaIndexInstrumentor().instrument(tracer_provider=tracer_provider)
+        LlamaIndexInstrumentor().instrument(
+            tracer_provider=tracer_provider, config=_trace_config()
+        )
 
     def _litellm(tracer_provider):
         from openinference.instrumentation.litellm import LiteLLMInstrumentor
 
-        LiteLLMInstrumentor().instrument(tracer_provider=tracer_provider)
+        LiteLLMInstrumentor().instrument(tracer_provider=tracer_provider, config=_trace_config())
 
     def _openai(tracer_provider):
         from openinference.instrumentation.openai import OpenAIInstrumentor
 
-        OpenAIInstrumentor().instrument(tracer_provider=tracer_provider)
+        OpenAIInstrumentor().instrument(tracer_provider=tracer_provider, config=_trace_config())
 
     return [
         ("crewai", _crewai),

@@ -171,6 +171,62 @@ def test_second_create_app_in_same_process_still_gets_a_real_traced_span(monkeyp
     assert format(trace_id, "032x") != "0" * 32
 
 
+def test_trace_config_defaults_to_full_capture(monkeypatch):
+    """`Settings.trace_content` defaults True, so today's demo behaviour
+    (prompts/completions/chunk text exported to Phoenix) must be unchanged
+    unless someone opts out.
+    """
+    monkeypatch.delenv("DOCUMIND_TRACE_CONTENT", raising=False)
+    from app.core.config import get_settings
+    get_settings.cache_clear()
+    from app.observability.tracing import _trace_config
+
+    config = _trace_config()
+    assert config.hide_inputs is False
+    assert config.hide_outputs is False
+    assert config.hide_embeddings_text is False
+
+
+def test_trace_config_hides_content_when_disabled(monkeypatch):
+    """Review-finding fix: `DOCUMIND_TRACE_CONTENT=false` must redact
+    prompt/completion/chunk text via OpenInference's own `TraceConfig`
+    masking (`hide_inputs`/`hide_outputs`/`hide_embeddings_text`), which
+    leaves span structure, timings and token-count attributes untouched --
+    none of those live on the attributes this config masks.
+    """
+    monkeypatch.setenv("DOCUMIND_TRACE_CONTENT", "false")
+    from app.core.config import get_settings
+    get_settings.cache_clear()
+    from app.observability.tracing import _trace_config
+
+    config = _trace_config()
+    assert config.hide_inputs is True
+    assert config.hide_outputs is True
+    assert config.hide_embeddings_text is True
+
+    get_settings.cache_clear()
+
+
+def test_instrumentors_pass_trace_config_to_instrument_call(monkeypatch):
+    """Each of the four process-wide instrumentors must actually receive the
+    `TraceConfig` built from `Settings.trace_content` -- not just have one
+    available -- otherwise the setting has no real effect on what Phoenix
+    receives.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from app.observability.tracing import _process_wide_instrumentors
+
+    registered = dict(_process_wide_instrumentors())
+    fake_provider = MagicMock()
+
+    with patch("openinference.instrumentation.crewai.CrewAIInstrumentor") as fake_cls:
+        registered["crewai"](fake_provider)
+        _, kwargs = fake_cls.return_value.instrument.call_args
+        assert kwargs["tracer_provider"] is fake_provider
+        assert kwargs["config"].hide_inputs == kwargs["config"].hide_outputs
+
+
 def test_importing_the_agents_package_does_not_pollute_the_environment():
     """Regression guard for the real failure this caused: `import crewai`
     runs `load_dotenv()`, which loaded the repo-root `.env` and overrode

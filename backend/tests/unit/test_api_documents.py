@@ -116,3 +116,44 @@ def test_upload_rejects_non_pdf(client):
         files={"file": ("evil.exe", b"MZ", "application/octet-stream")},
     )
     assert r.status_code == 400
+
+
+def test_upload_rejects_pdf_without_magic_header(client, tmp_path):
+    """Review-finding fix: a `.pdf`-named upload whose content is not a real
+    PDF must be rejected on the actual bytes, not waved through on the
+    filename suffix alone.
+    """
+    r = client.post(
+        "/api/v1/documents", headers=AUTH,
+        files={"file": ("fake.pdf", b"this is not a pdf at all", "application/pdf")},
+    )
+    assert r.status_code == 400
+    assert "PDF" in r.json()["detail"] or "pdf" in r.json()["detail"]
+    assert not (tmp_path / "fake.pdf").exists(), "rejected upload must not leave a partial file"
+
+
+def test_upload_rejects_empty_file(client):
+    r = client.post(
+        "/api/v1/documents", headers=AUTH,
+        files={"file": ("empty.pdf", b"", "application/pdf")},
+    )
+    assert r.status_code == 400
+
+
+def test_upload_rejects_oversized_file_and_cleans_up_partial_write(client, monkeypatch, tmp_path):
+    """Review-finding fix: enforce `Settings.max_upload_bytes` with a 413,
+    and never leave a partially written file behind on rejection. The limit
+    is dropped to a few bytes here (rather than uploading a real 25 MiB
+    payload) purely to keep the test fast; the enforcement path is identical
+    at any limit.
+    """
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "max_upload_bytes", 16)
+    payload = b"%PDF-1.7" + b"x" * 200  # well past the 16-byte limit
+    r = client.post(
+        "/api/v1/documents", headers=AUTH,
+        files={"file": ("big.pdf", payload, "application/pdf")},
+    )
+    assert r.status_code == 413
+    assert not (tmp_path / "big.pdf").exists(), "rejected oversized upload must not leave a partial file"

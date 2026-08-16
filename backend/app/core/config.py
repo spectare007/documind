@@ -12,6 +12,25 @@ class Settings(BaseSettings):
 
     # Security
     api_key: str = "documind-dev-key"
+    # Content-capture switch for tracing (fix for a review finding: the
+    # corpus here is real personal financial documents -- payslips, invoices,
+    # a filed tax form -- and Phoenix's `phoenix_data` volume had no
+    # retention policy and no way to turn content capture off). True keeps
+    # today's behaviour unchanged (prompts, retrieved chunk text and
+    # completions are exported to Phoenix, as they always have been). Set to
+    # False before pointing this at a real corpus on a shared machine: span
+    # structure, timings and token counts are still exported, only the
+    # prompt/completion/chunk *text* is redacted. See
+    # `app.observability.tracing._trace_config` for how this is wired into
+    # OpenInference's own masking config, and the README's "Data handling and
+    # security posture" section for the full story.
+    trace_content: bool = True
+    # Maximum accepted size, in bytes, for a single `POST /api/v1/documents`
+    # upload (fix for a review finding: the endpoint used to read an
+    # unbounded file fully into memory before writing it). 25 MiB comfortably
+    # covers a scanned multi-page payslip/invoice/tax filing while bounding
+    # both memory and disk exposure from an unauthenticated-content upload.
+    max_upload_bytes: int = 25 * 1024 * 1024
 
     # Services
     database_url: str = "postgresql+psycopg://documind:documind@localhost:5432/documind"

@@ -117,7 +117,9 @@ Every setting is a `DOCUMIND_`-prefixed environment variable (via `pydantic-sett
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DOCUMIND_API_KEY` | `documind-dev-key` | Bearer token required on every protected endpoint. OpenWebUI is configured to send this as its OpenAI API key. |
+| `DOCUMIND_API_KEY` | `documind-dev-key` | Bearer token required on every protected endpoint. OpenWebUI is configured to send this as its OpenAI API key. Compared with `hmac.compare_digest`, not `==`, so a wrong guess cannot be timed byte-by-byte. |
+| `DOCUMIND_TRACE_CONTENT` | `true` | Content-capture switch for Phoenix tracing. `true` keeps today's behaviour: prompts, retrieved chunk text and completions are exported to Phoenix, with no retention policy on its `phoenix_data` volume. Set to `false` before pointing this at a real corpus on a shared machine; span structure, timings and token counts still export either way. See Section 10. |
+| `DOCUMIND_MAX_UPLOAD_BYTES` | `26214400` (25 MiB) | Maximum accepted size for a single `POST /api/v1/documents` upload, enforced while streaming so an oversized file is rejected (413) without ever being read fully into memory. |
 | `DOCUMIND_DATABASE_URL` | `postgresql+psycopg://documind:documind@localhost:5432/documind` | Postgres connection string (vector store + ingestion ledger). |
 | `DOCUMIND_OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server for both generation and embeddings. |
 | `DOCUMIND_PHOENIX_BASE_URL` | `http://localhost:6006` | Phoenix server for tracing export and the prompt hub. |
@@ -160,6 +162,8 @@ All endpoints except `/health` require `Authorization: Bearer <DOCUMIND_API_KEY>
 
 Interactive docs: `http://localhost:8000/docs` (Swagger UI, auto-generated from the same schema). Full request/response shapes and error codes: **[doc/api.md](doc/api.md)**. Machine-readable schema: **[doc/openapi.json](doc/openapi.json)**, exported by `scripts/export_openapi.py` and authoritative over any hand-written description if the two ever disagree.
 
+`POST /api/v1/documents` validates the upload before it ever reaches the ingestion pipeline: the filename must end in `.pdf`, the bytes actually read back must start with the PDF magic header (`%PDF`), and the total size is capped at `DOCUMIND_MAX_UPLOAD_BYTES` (default 25 MiB), enforced while streaming so an oversized upload is rejected with `413` without being buffered fully in memory first. A rejected upload never leaves a partial file behind.
+
 ---
 
 ## 6. Observability & PromptOps
@@ -172,6 +176,8 @@ Open Phoenix at `http://localhost:6006`.
 
 - **Quick experiment / one-off tweak:** edit it directly in the Phoenix UI (Prompts tab). Takes effect immediately for new requests.
 - **Permanent change:** edit the `.yaml` file in `prompts/`, bump its `version:` field, and commit it. It syncs to Phoenix on the next backend restart.
+
+**Prompt injection.** The context interpolated into `grader.yaml`, `synthesizer.yaml` and `hallucination_checker.yaml` is untrusted: it is text extracted from whatever PDFs were ingested, and a hostile document could contain a line addressed directly at the model ("ignore previous instructions and..."). Each of those three templates now wraps the interpolated document text in explicit `<<<DOCUMENT_CONTEXT>>>` / `<<<END_DOCUMENT_CONTEXT>>>` (or `<<<DOCUMENT_TEXT>>>` for the grader) delimiters and states that text inside them is data to analyze, never an instruction to follow. This reduces injection risk, it does not eliminate it: qwen2.5:3b is not a model with strong instruction-hierarchy training, and no prompt-level delimiter is airtight against every phrasing a document could contain. See Section 10 for the honest version of this claim. One structural mitigation is real, not just a prompt-level one: since the retrieval stage (`CrewStages.research`) was converted from a CrewAI agent with a `document_search` tool into a plain function (Section 6's trace description), retrieved text can no longer influence *tool selection* the way it could when an agent was reading tool output and deciding what to call next; retrieval now runs the queries chosen upstream and returns chunks, full stop.
 
 ---
 
@@ -259,3 +265,25 @@ documind/
 - **[doc/openapi.json](doc/openapi.json)**: the raw OpenAPI 3 schema, exported from the running FastAPI app. Authoritative if it ever disagrees with the hand-written docs.
 - **doc/evaluation-report.md**: RAGAs results and the agentic-vs-naive latency/quality comparison, produced by `scripts/evaluate.py`.
 - **[doc/presentation/deck.md](doc/presentation/deck.md)**: the Marp slide deck covering the brief, architecture, mandated-tool mapping, ingestion and agentic pipelines, observability, PromptOps, evaluation, and engineering findings; see `doc/presentation/README.md` for how to render it.
+
+---
+
+## 10. Data handling and security posture
+
+This system was built to run against a real, personal document corpus (a payslip, invoices, a filed tax form) on one machine for one person. That shaped what got fixed and what got documented instead of fixed. Read this section before pointing it at anyone else's documents, or running it on a machine other people can reach.
+
+**What is stored, where:**
+
+- **Postgres** holds the ingestion ledger (filenames, hashes, status) and the chunk table (`data_rag_chunks` by default): the actual extracted document text, split into chunks, plus its embedding vectors. This is the durable, queryable copy of your corpus. `DELETE /api/v1/documents/{id}` removes both the ledger row and the vector chunks for that document.
+- **Phoenix** (`phoenix_data` volume) receives an OpenTelemetry trace for every request: by default this includes the full prompt text sent to the model, the model's completion, and (via the retriever/chain spans) the retrieved chunk text -- i.e., a second, independent copy of the same sensitive content, with **no retention policy** and no automatic expiry. `DOCUMIND_TRACE_CONTENT=false` (Section 4) stops new traces from carrying that text going forward: span structure, timings and token counts still export, only the content is redacted at the OpenInference instrumentation layer via `hide_inputs`/`hide_outputs`/`hide_embeddings_text` (`app.observability.tracing._trace_config`).
+- **`DELETE /api/v1/documents/{id}` does not purge Phoenix.** Removing a document from Postgres does not touch any trace already captured for it. If `DOCUMIND_TRACE_CONTENT` was `true` (the default) when a document was queried, its chunk text and any answer built from it live on in `phoenix_data` until someone manually clears that volume. There is no code path in this project that reaches into Phoenix's storage to redact or delete a specific trace.
+- **OpenWebUI** (`openwebui_data` volume) keeps its own chat history client-side of the backend: every question you asked and every answer you got, independent of both Postgres and Phoenix.
+- **Ollama** does not persist prompts or completions beyond serving the request; the models themselves are the only persistent state on that side.
+
+**Auth posture, stated plainly:** `WEBUI_AUTH=false` in `docker-compose.yml` means OpenWebUI itself has no login, by design, for the one-command local demo this was built for; it is not changed here because doing so would break that startup flow, not because it is the right setting for anything beyond a single trusted user on one machine. The backend's own protected endpoints require a bearer token (`DOCUMIND_API_KEY`, compared with `hmac.compare_digest` -- Section 4), but it is one shared static token, not per-user auth, and every service in `docker-compose.yml` binds to a host port with no network policy between them. **Read the whole stack as localhost-only.** If you put this behind anything other than `localhost` -- a shared machine, a LAN, a reverse proxy that isn't also doing real authentication -- do at least this first:
+
+1. Turn off content capture (`DOCUMIND_TRACE_CONTENT=false`) before ingesting anything sensitive, since a trace captured before you flip it back on stays in `phoenix_data` regardless.
+2. Put real authentication in front of OpenWebUI (it supports its own user accounts once `WEBUI_AUTH` is left at its own default; that's an OpenWebUI-side change, not a DocuMind one) and treat `DOCUMIND_API_KEY` as a secret worth rotating, not the demo default.
+3. Decide who is allowed to reach ports 3000 (OpenWebUI), 6006 (Phoenix), 8000 (backend), 5432 (Postgres) and 11434 (Ollama) at the network layer; none of them are hardened for exposure beyond a trusted host.
+
+**What was fixed here, and what was not:** the four items above (content-capture switch, constant-time key comparison, upload size/type validation, this document) are the fixes. What was *not* attempted: per-user authentication, a Phoenix retention/redaction job, encryption at rest for Postgres or the Phoenix volume, and network segmentation between the compose services. Those are real gaps for a multi-user or internet-facing deployment; this remains, deliberately, a hardened-for-honesty local tool, not a hardened-for-production one.
