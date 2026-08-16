@@ -55,12 +55,13 @@ def create_app() -> FastAPI:
         setup_tracing(app)
     except ImportError:
         logger.info("tracing module not present yet")
-    from app.api import documents, health, ingest, query
+    from app.api import documents, health, ingest, openai_compat, query
     app.include_router(health.router)
     protected = [Depends(require_api_key)]
     app.include_router(documents.router, dependencies=protected)
     app.include_router(ingest.router, dependencies=protected)
     app.include_router(query.router, dependencies=protected)
+    app.include_router(openai_compat.router, dependencies=protected)
     return app
 
 
