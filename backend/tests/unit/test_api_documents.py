@@ -28,6 +28,33 @@ def client(monkeypatch, tmp_path):
         yield c
 
 
+def test_lifespan_syncs_then_refreshes_prompts(monkeypatch, tmp_path):
+    """Finding 1 regression test: the lifespan must call sync_to_phoenix()
+    and then refresh_from_phoenix() on every app startup, so a prompt edited
+    in the Phoenix UI takes effect for this process without a restart.
+    """
+    import app.db.session as db_session
+    engine = create_engine(f"sqlite:///{tmp_path}/test_lifespan.db")
+    db_session.get_engine.cache_clear()
+    monkeypatch.setattr(db_session, "get_engine", lambda: engine)
+    monkeypatch.setenv("DOCUMIND_DATA_DIR", str(tmp_path))
+
+    import app.observability.prompts as prompts_module
+    fake_manager = MagicMock()
+    call_order = []
+    fake_manager.sync_to_phoenix.side_effect = lambda: call_order.append("sync")
+    fake_manager.refresh_from_phoenix.side_effect = lambda: call_order.append("refresh")
+
+    with patch.object(prompts_module, "get_prompt_manager", return_value=fake_manager):
+        from app.main import create_app
+        with TestClient(create_app()):
+            pass
+
+    fake_manager.sync_to_phoenix.assert_called_once()
+    fake_manager.refresh_from_phoenix.assert_called_once()
+    assert call_order == ["sync", "refresh"]
+
+
 def test_health_is_public(client):
     with patch("app.api.health._check_url", return_value=True):
         r = client.get("/health")

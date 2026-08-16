@@ -21,7 +21,11 @@ async def lifespan(app: FastAPI):
         logger.info("tracing module not present yet")
     try:
         from app.observability.prompts import get_prompt_manager
-        get_prompt_manager().sync_to_phoenix()
+        manager = get_prompt_manager()
+        manager.sync_to_phoenix()
+        # Pull back any UI edits so they win over YAML for this process,
+        # without needing a restart (see PromptManager.refresh_from_phoenix).
+        manager.refresh_from_phoenix()
     except ImportError:
         logger.info("prompt manager not present yet")
     yield
