@@ -46,3 +46,40 @@ def test_scrub_is_a_noop_when_nothing_leaked(monkeypatch):
     _scrub_env_pollution(env_before)  # nothing new appeared
 
     assert os.environ["DOCUMIND_TEST_PRE_EXISTING"] == "keep-me"
+
+
+def test_no_env_pollution_context_manager_cleans_up_even_on_error(monkeypatch):
+    """`app.agents` wraps its `import crewai` in this; a failed import must
+    still not leave the process environment poisoned.
+    """
+    from app.core.env_guard import no_env_pollution
+
+    monkeypatch.setenv("DOCUMIND_TEST_PRE_EXISTING", "keep-me")
+
+    with pytest.raises(RuntimeError), no_env_pollution():
+        os.environ["DOCUMIND_TEST_LEAKED_DURING_INSTRUMENTATION"] = "change-me"
+        raise RuntimeError("import blew up halfway")
+
+    assert "DOCUMIND_TEST_LEAKED_DURING_INSTRUMENTATION" not in os.environ
+    assert os.environ["DOCUMIND_TEST_PRE_EXISTING"] == "keep-me"
+
+
+def test_importing_the_agents_package_does_not_pollute_the_environment():
+    """Regression guard for the real failure this caused: `import crewai`
+    runs `load_dotenv()`, which loaded the repo-root `.env` and overrode
+    `DOCUMIND_API_KEY` process-wide, breaking API-key auth for every test
+    that ran afterwards. Run in a subprocess so the check is unaffected by
+    whatever this session already imported.
+    """
+    import subprocess
+    import sys
+
+    probe = (
+        "import os; before = set(os.environ);"
+        " import app.agents;"
+        " print(sorted(set(os.environ) - before))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=True,
+    )
+    assert result.stdout.strip() == "[]", result.stdout

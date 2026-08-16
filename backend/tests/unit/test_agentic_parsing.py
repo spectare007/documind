@@ -1,0 +1,41 @@
+"""Pure-function tests for the agentic pipeline's LLM output parsers.
+
+These lock in the *safe defaults* that keep the corrective-RAG loop from
+degrading into silence when a small local model answers off-format: routing
+defaults to retrieval, grading defaults to keeping everything, and the
+groundedness check fails open.
+"""
+
+from app.agents.stages import parse_indices, parse_queries, parse_route, parse_verdict
+
+
+def test_parse_route():
+    assert parse_route("rag") == "rag"
+    assert parse_route(" Direct.\n") == "direct"
+    assert parse_route("gibberish") == "rag"  # safe default: retrieve
+
+
+def test_parse_queries():
+    assert parse_queries('["a", "b"]') == ["a", "b"]
+    assert parse_queries('Here you go: ["invoice total June"]') == ["invoice total June"]
+    assert parse_queries("not json", fallback="orig q") == ["orig q"]
+
+
+def test_parse_indices():
+    assert parse_indices("[0, 2]", n_chunks=3) == [0, 2]
+    assert parse_indices("[0, 9]", n_chunks=3) == [0]   # out of range dropped
+    assert parse_indices("none relevant []", n_chunks=3) == []
+    assert parse_indices("garbage", n_chunks=2) == [0, 1]  # unparseable: keep all
+    # Observed live: given a single chunk, qwen2.5:3b copies the "e.g. [0, 2]"
+    # example straight out of the grader prompt. Every index out of range is a
+    # malformed reply, not a judgment of irrelevance, so it fails open too --
+    # otherwise the pipeline answers "I couldn't find anything" for a corpus
+    # that does contain the answer.
+    assert parse_indices("[2]", n_chunks=1) == [0]
+    assert parse_indices("[7, 9]", n_chunks=2) == [0, 1]
+
+
+def test_parse_verdict():
+    assert parse_verdict("yes") is True
+    assert parse_verdict(" No\n") is False
+    assert parse_verdict("unclear") is True  # fail open: do not block answers

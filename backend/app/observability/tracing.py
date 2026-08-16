@@ -53,17 +53,14 @@ real env vars outrank pydantic-settings' own `env_file=".env"` lookup, that
 silently overrides every `get_settings()` call for the rest of the process
 (this was caught because it broke API-key auth in tests that ran after
 tracing setup). `setup_tracing()` snapshots `os.environ` before
-instrumenting and scrubs (`_scrub_env_pollution`) any keys that appear
-afterward, so this specific third-party import side effect can never leak
-into our config. This is the one place in the codebase that reads/mutates
-`os.environ` directly, and it does so deliberately and narrowly: it is not
-a general env-var reader, it never *adds* config from the environment, it
-only *removes* keys that (a) were absent immediately before this function's
-instrumentor loop and (b) appeared during that loop -- i.e. it can only ever
-undo pollution this exact function just caused by importing third-party
-libraries. A real deployment's env vars (Docker, docker-compose, a shell
-export) are already present in `os.environ` before the Python interpreter
-even starts, so they're captured in `env_before` and are never touched.
+instrumenting and scrubs (`_scrub_env_pollution`, from `app.core.env_guard`)
+any keys that appear afterward, so this specific third-party import side
+effect can never leak into our config.
+
+`app.core.env_guard` is the single place in the codebase that reads/mutates
+`os.environ`, holds the full rationale, and is shared with `app.agents`,
+which imports CrewAI itself (not just its instrumentor) and needs exactly
+the same containment.
 """
 
 import logging
@@ -71,6 +68,12 @@ import os
 from typing import TYPE_CHECKING
 
 from app.core.config import get_settings
+
+# Re-exported under its historical private name: this module's callers and
+# tests refer to `_scrub_env_pollution`, while the implementation (and the
+# full rationale) now lives in `app.core.env_guard` so `app.agents` -- which
+# imports CrewAI directly, not just its instrumentor -- can share it.
+from app.core.env_guard import scrub_env_pollution as _scrub_env_pollution
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -125,26 +128,6 @@ def setup_tracing(app: "FastAPI | None" = None) -> None:
         succeeded,
         failed,
     )
-
-
-def _scrub_env_pollution(env_before: set[str]) -> None:
-    """Remove env vars that appeared during instrumentation imports.
-
-    See module docstring ("Deliberate, documented exception..."): CrewAI's
-    own `load_dotenv()` can inject vars from an unrelated `.env` file found
-    by walking up from cwd. Only vars that were absent before instrumentation
-    and present after are removed -- anything the deployment genuinely set
-    before startup is left alone.
-    """
-    leaked = set(os.environ) - env_before
-    for key in leaked:
-        del os.environ[key]
-    if leaked:
-        logger.warning(
-            "scrubbed %d env var(s) leaked by instrumentation imports: %s",
-            len(leaked),
-            sorted(leaked),
-        )
 
 
 def _instrumentors(app: "FastAPI | None"):

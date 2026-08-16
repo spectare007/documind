@@ -1,0 +1,233 @@
+"""One single-agent CrewAI crew per corrective-RAG stage.
+
+Why one crew per stage rather than one multi-agent crew: the pipeline needs
+*programmatic* control over the retry loops (bounded attempts, feedback
+threaded into the next attempt, an honest `grounded` flag on the way out).
+Delegation inside a single crew would hide that control flow inside the LLM's
+own judgment and make the attempt counters unbounded and untestable. So
+`app.pipelines.agentic.AgenticPipeline` owns the graph, and this module owns
+"turn one prompt into one parsed value".
+
+Everything an LLM returns is funnelled through the pure `parse_*` helpers
+below. They are the safety layer for a small local model that will sometimes
+answer off-format, and each one fails toward *more* work rather than less:
+route -> retrieve, ungradeable chunks -> keep them, unreadable verdict ->
+treat the answer as grounded rather than block it.
+"""
+
+import json
+import logging
+import re
+
+from crewai import Agent, Crew, Process, Task
+
+from app.agents.llm import get_crew_llm
+from app.agents.tools import DocumentSearchTool
+from app.observability.prompts import get_prompt_manager
+from app.pipelines.simple import format_context
+from app.pipelines.types import RetrievedChunk
+from app.retrieval.retriever import HybridRetriever
+
+logger = logging.getLogger(__name__)
+
+# Agents are told what they are, not what to say: the actual instructions all
+# come from the versioned prompt templates via `get_prompt_manager()`.
+_BACKSTORY = "You work inside DocuMind, a document search platform."
+
+# A stage agent gets at most this many reasoning/tool iterations before CrewAI
+# forces it to answer. Only the researcher genuinely loops (one tool call per
+# rewritten query, of which there are at most three); the rest answer in one.
+_MAX_ITER = 3
+
+MAX_REWRITTEN_QUERIES = 3
+
+
+# --- pure parse helpers (tested directly) ---
+
+
+def parse_route(text: str) -> str:
+    """`"direct"` only on an explicit direct signal; anything else retrieves."""
+    return "direct" if "direct" in text.strip().lower() else "rag"
+
+
+def _extract_json_array(text: str) -> list | None:
+    """First JSON array embedded anywhere in `text`, or None.
+
+    Small models like to wrap answers in prose ("Sure, here you go: [...]"),
+    so the array is located by regex rather than parsing the whole reply.
+    """
+    match = re.search(r"\[.*?\]", text, re.DOTALL)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, list) else None
+
+
+def parse_queries(text: str, fallback: str = "") -> list[str]:
+    """Up to `MAX_REWRITTEN_QUERIES` search queries; `fallback` if unparseable."""
+    arr = _extract_json_array(text)
+    queries = [q.strip() for q in (arr or []) if isinstance(q, str) and q.strip()]
+    if queries:
+        return queries[:MAX_REWRITTEN_QUERIES]
+    return [fallback] if fallback else []
+
+
+def parse_indices(text: str, n_chunks: int) -> list[int]:
+    """Relevant chunk indices, failing open on a malformed grader reply.
+
+    Three cases, and the distinction between the last two matters:
+
+    * no JSON array at all -> keep every chunk. A grader that cannot answer
+      in format must not be able to starve the synthesizer.
+    * an explicit empty array -> keep nothing. This is a real judgment and is
+      respected: it is what triggers the corrective retrieval retry.
+    * a non-empty array whose entries are *all* out of range -> keep every
+      chunk. This is a malformed reply wearing the right punctuation, not a
+      judgment of irrelevance, so it gets the same fail-open treatment as an
+      unparseable one. Observed live: given one chunk, qwen2.5:3b copies the
+      `e.g. [0, 2]` example out of the grader prompt and answers `[2]`, which
+      would otherwise silently reduce to "nothing is relevant" and make the
+      whole pipeline answer "I couldn't find anything" for a corpus that does
+      contain the answer.
+
+    Mixed replies (`[0, 9]` over 3 chunks) keep the valid entries and drop the
+    rest -- there the in-range index is real signal.
+    """
+    arr = _extract_json_array(text)
+    if arr is None:
+        return list(range(n_chunks))
+    indices = sorted(
+        {int(i) for i in arr if isinstance(i, (int, float)) and 0 <= int(i) < n_chunks}
+    )
+    if arr and not indices:
+        logger.warning(
+            "grader returned %r: no index in range 0..%d; keeping all chunks",
+            arr, n_chunks - 1,
+        )
+        return list(range(n_chunks))
+    return indices
+
+
+def parse_verdict(text: str) -> bool:
+    """Groundedness verdict, failing open: only an explicit "no" blocks."""
+    return not text.strip().lower().startswith("no")
+
+
+# --- crew stages: one single-agent Crew per pipeline step ---
+
+
+class CrewStages:
+    """The six agent roles of the corrective-RAG graph, plus the direct reply.
+
+    Constructor arguments exist for tests and for the evaluation harness:
+    passing an `llm`/`retriever` avoids touching Ollama or Postgres.
+    """
+
+    def __init__(self, llm=None, retriever: HybridRetriever | None = None) -> None:
+        self.llm = llm or get_crew_llm()
+        self.retriever = retriever or HybridRetriever()
+        self.prompts = get_prompt_manager()
+
+    def _kickoff(self, role: str, goal: str, description: str,
+                 expected_output: str, tools: list | None = None) -> str:
+        """Run a one-agent, one-task crew and return its raw text output.
+
+        `str(CrewOutput)` yields `.raw` (the final task's text) unless a
+        structured output was requested, which it never is here.
+        """
+        agent = Agent(role=role, goal=goal, backstory=_BACKSTORY,
+                      llm=self.llm, tools=tools or [], verbose=False,
+                      allow_delegation=False, max_iter=_MAX_ITER)
+        task = Task(description=description, expected_output=expected_output, agent=agent)
+        crew = Crew(agents=[agent], tasks=[task], process=Process.sequential, verbose=False)
+        return str(crew.kickoff())
+
+    def route(self, question: str) -> str:
+        out = self._kickoff("Query Router", "Classify queries precisely",
+                            self.prompts.get("router", question=question),
+                            "one word: rag or direct")
+        return parse_route(out)
+
+    def rewrite(self, question: str, history: str, feedback: str) -> list[str]:
+        fb = f"\nFeedback from a failed retrieval attempt: {feedback}" if feedback else ""
+        out = self._kickoff(
+            "Query Rewriter", "Produce excellent standalone search queries",
+            self.prompts.get("rewriter", question=question,
+                             history=history or "(empty)", feedback=fb),
+            "JSON array of 1-3 query strings",
+        )
+        return parse_queries(out, fallback=question)
+
+    def research(self, queries: list[str]) -> list[RetrievedChunk]:
+        """Search once per query and return the deduplicated chunks.
+
+        The agent's own reply is thrown away -- only the structured chunks it
+        pushed into `buffer` matter. Two safety nets keep this stage from ever
+        returning nothing for a recoverable reason: a crew failure is logged
+        and swallowed, and an agent that never called the tool (small models
+        sometimes just answer from memory) is backstopped by running the
+        retriever directly.
+        """
+        buffer: list[RetrievedChunk] = []
+        tool = DocumentSearchTool(retriever=self.retriever, buffer=buffer)
+        description = (
+            "Use the document_search tool once per query to gather evidence. Queries:\n"
+            + "\n".join(f"- {q}" for q in queries)
+            + "\nAfter searching, reply with a one-line summary of what was found."
+        )
+        try:
+            self._kickoff("Researcher", "Gather relevant document evidence",
+                          description, "one-line summary", tools=[tool])
+        except Exception as exc:
+            logger.warning("researcher crew failed (%s); falling back to direct retrieval", exc)
+        if not buffer:
+            logger.info("researcher produced no tool results; retrieving directly")
+            for q in queries:
+                buffer.extend(self.retriever.retrieve(q))
+        seen: set[str] = set()
+        unique = [c for c in buffer if not (c.text in seen or seen.add(c.text))]
+        logger.info("research stage: %d queries -> %d unique chunks", len(queries), len(unique))
+        return unique
+
+    def grade(self, question: str, chunks: list[RetrievedChunk]) -> list[int]:
+        numbered = "\n\n".join(f"[{i}] {c.text}" for i, c in enumerate(chunks))
+        out = self._kickoff("Relevance Grader", "Judge context strictly",
+                            self.prompts.get("grader", question=question, chunks=numbered),
+                            "JSON array of relevant chunk numbers")
+        return parse_indices(out, n_chunks=len(chunks))
+
+    def synthesize(self, question: str, chunks: list[RetrievedChunk], feedback: str) -> str:
+        fb = f"\nIMPORTANT: {feedback}" if feedback else ""
+        return self._kickoff(
+            "Answer Synthesizer", "Write grounded, cited answers",
+            self.prompts.get("synthesizer", context=format_context(chunks),
+                             question=question, feedback=fb),
+            "a grounded answer with [title, section] citations",
+        ).strip()
+
+    def check(self, answer: str, chunks: list[RetrievedChunk]) -> bool:
+        out = self._kickoff(
+            "Groundedness Checker", "Detect unsupported claims",
+            self.prompts.get("hallucination_checker",
+                             context=format_context(chunks), answer=answer),
+            "one word: yes or no",
+        )
+        return parse_verdict(out)
+
+    def direct_answer(self, question: str) -> str:
+        """Reply to small talk / questions about the assistant, no retrieval.
+
+        Deliberately the one task description built in code rather than read
+        from `prompts/`: it is a chit-chat instruction with nothing to tune or
+        evaluate, and the five versioned prompt templates are a fixed, synced
+        set (`app.observability.prompts.PROMPT_NAMES`) covering the retrieval
+        graph. If this ever needs tuning it should become a sixth template.
+        """
+        return self._kickoff(
+            "Assistant", "Answer briefly and helpfully",
+            f"You are DocuMind, a document search assistant. Reply briefly to: {question}",
+            "a short friendly reply",
+        ).strip()
