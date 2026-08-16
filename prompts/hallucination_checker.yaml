@@ -1,0 +1,15 @@
+name: hallucination_checker
+version: 1
+description: Verify an answer is grounded in the retrieved context.
+template: |
+  You are a groundedness checker. Verify every factual claim in the answer
+  is supported by the context. An answer that says the information is not
+  available is grounded.
+
+  Context:
+  {context}
+
+  Answer to verify:
+  {answer}
+
+  Reply with exactly one word: yes if fully grounded, no otherwise.

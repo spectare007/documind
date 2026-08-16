@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.12, uv, FastAPI, Docling, LlamaIndex, PGVector (Postgres 16), CrewAI, Ollama (`qwen2.5:3b`, `nomic-embed-text`, `qwen2.5:7b`), Arize Phoenix, RAGAs, OpenWebUI, Docker Compose.
 
-**Spec:** `docs/superpowers/specs/REDACTED-08-15-documind-design.md`
+**Spec:** `docs/superpowers/specs/2026-08-15-documind-design.md`
 
 ## Global Constraints
 
@@ -280,7 +280,7 @@ git commit -m "feat: backend scaffold with typed settings and logging core"
 - Create: `docker-compose.yml`, `backend/Dockerfile`, `backend/.dockerignore`
 
 **Interfaces:**
-- Produces: services `postgres:5432`, `ollama:11434`, `phoenix:6006`, `openwebui:REDACTED→8080`, `backend:8000`; named volumes `pgdata`, `ollama_data`, `phoenix_data`, `hf_cache`. Later integration tests assume these host ports.
+- Produces: services `postgres:5432`, `ollama:11434`, `phoenix:6006`, `openwebui:3000→8080`, `backend:8000`; named volumes `pgdata`, `ollama_data`, `phoenix_data`, `hf_cache`. Later integration tests assume these host ports.
 
 - [ ] **Step 1: Write compose file**
 
@@ -348,7 +348,7 @@ services:
 
   openwebui:
     image: ghcr.io/open-webui/open-webui:main
-    ports: ["REDACTED:8080"]
+    ports: ["3000:8080"]
     environment:
       OPENAI_API_BASE_URL: http://backend:8000/v1
       OPENAI_API_KEY: ${DOCUMIND_API_KEY:-change-me}
@@ -689,8 +689,8 @@ def _chunk(**kw):
 
 def test_header_with_sections():
     from app.ingestion.contextualizer import contextualize
-    out = contextualize(_chunk(section_path=["Invoice Details", "Line Items"]), "Invoice REDACTEDe REDACTED")
-    assert out.startswith("[Invoice REDACTEDe REDACTED > Invoice Details > Line Items]\n\n")
+    out = contextualize(_chunk(section_path=["Invoice Details", "Line Items"]), "Invoice June 2026")
+    assert out.startswith("[Invoice June 2026 > Invoice Details > Line Items]\n\n")
     assert out.endswith("Total amount due: EUR 1,200")
 
 
@@ -2351,7 +2351,7 @@ def test_parse_route():
 
 def test_parse_queries():
     assert parse_queries('["a", "b"]') == ["a", "b"]
-    assert parse_queries('Here you go: ["invoice total REDACTEDe"]') == ["invoice total REDACTEDe"]
+    assert parse_queries('Here you go: ["invoice total June"]') == ["invoice total June"]
     assert parse_queries("not json", fallback="orig q") == ["orig q"]
 
 
@@ -2951,7 +2951,7 @@ In `create_app()`: `from app.api import openai_compat` … `app.include_router(o
 
 - [ ] **Step 4: Run — verify PASS** (`uv run pytest tests/unit/test_openai_compat.py -v` → 5 PASS; full suite green)
 
-- [ ] **Step 5: Live OpenWebUI check** — `docker compose up -d --build backend openwebui`; open `http://localhost:REDACTED`; model `agentic-rag` appears in the dropdown; ask "What documents do you have about invoices?" → collapsible thinking panel with stage statuses, then the cited answer. Trace visible in Phoenix.
+- [ ] **Step 5: Live OpenWebUI check** — `docker compose up -d --build backend openwebui`; open `http://localhost:3000`; model `agentic-rag` appears in the dropdown; ask "What documents do you have about invoices?" → collapsible thinking panel with stage statuses, then the cited answer. Trace visible in Phoenix.
 
 - [ ] **Step 6: Commit**
 
@@ -2979,17 +2979,17 @@ Open each PDF in `data/documents/` and write **15+ entries** in `evaluation/gold
 ```json
 [
   {
-    "question": "What is the total amount on the REDACTEDe REDACTED invoice?",
-    "reference": "The total amount on the REDACTEDe REDACTED invoice is <actual amount from the PDF>.",
+    "question": "What is the total amount on the June 2026 invoice?",
+    "reference": "The total amount on the June 2026 invoice is <actual amount from the PDF>.",
     "category": "single-doc-numeric"
   },
   {
-    "question": "What is the net pay in the REDACTEDe REDACTED payslip?",
-    "reference": "The net pay for REDACTEDe REDACTED is <actual amount>.",
+    "question": "What is the net pay in the June 2026 payslip?",
+    "reference": "The net pay for June 2026 is <actual amount>.",
     "category": "single-doc-numeric"
   },
   {
-    "question": "Compare the two REDACTEDe REDACTED invoices: which one has the higher total?",
+    "question": "Compare the two June 2026 invoices: which one has the higher total?",
     "reference": "<which invoice> has the higher total (<amount A> vs <amount B>).",
     "category": "multi-doc"
   },
@@ -3182,7 +3182,7 @@ Run it; commit output.
   1. **DocuMind** — one-paragraph pitch + feature bullets (agentic corrective RAG, hybrid search, tracing, PromptOps, evaluation).
   2. **Architecture at a glance** — the service table from the spec + a Mermaid `graph LR` of OpenWebUI → backend → (CrewAI stages) → PGVector/Ollama, with Phoenix tapping all calls; link to `doc/architecture.md` for detail.
   3. **Prerequisites** — Docker Desktop, ~10 GB disk for models/images, no GPU needed.
-  4. **Quick start** — numbered: `cp .env.example .env` (set `DOCUMIND_API_KEY`) → `docker compose up -d --build` → wait for `ollama-init` (`docker compose logs -f ollama-init`) → drop PDFs into `data/documents/` → `curl -X POST localhost:8000/api/v1/ingest -H "Authorization: Bearer <key>"` → open `http://localhost:REDACTED`, pick `agentic-rag`, chat. Include the expected-latency note (CPU, ~5-8 LLM calls/answer) and the `DOCUMIND_PIPELINE_MODE=simple` fast mode.
+  4. **Quick start** — numbered: `cp .env.example .env` (set `DOCUMIND_API_KEY`) → `docker compose up -d --build` → wait for `ollama-init` (`docker compose logs -f ollama-init`) → drop PDFs into `data/documents/` → `curl -X POST localhost:8000/api/v1/ingest -H "Authorization: Bearer <key>"` → open `http://localhost:3000`, pick `agentic-rag`, chat. Include the expected-latency note (CPU, ~5-8 LLM calls/answer) and the `DOCUMIND_PIPELINE_MODE=simple` fast mode.
   5. **Configuration** — table of every `DOCUMIND_*` variable: name, default, purpose.
   6. **REST API** — summary table of all endpoints; links to Swagger UI (`localhost:8000/docs`), `doc/api.md`, `doc/openapi.json`.
   7. **Observability & PromptOps** — Phoenix UI (`localhost:6006`), what a trace shows, how to edit prompts in Phoenix vs YAML.
@@ -3208,9 +3208,9 @@ git commit -m "docs: README, architecture, API reference, ADRs, OpenAPI export"
 ### Task 14: Presentation deck & final verification
 
 **Files:**
-- Create: `doc/presentation/deck.md` (REDACTEDp), `doc/presentation/README.md` (how to render)
+- Create: `doc/presentation/deck.md` (Marp), `doc/presentation/README.md` (how to render)
 
-- [ ] **Step 1: Write the REDACTEDp deck** — `doc/presentation/deck.md` with `marp: true` front-matter, ~12 slides: (1) DocuMind title + one-liner; (2) Problem & requirements; (3) Architecture diagram (reuse Mermaid or ASCII); (4) Mandated-stack mapping table (tool → where it lives in the repo); (5) Ingestion pipeline; (6) Contextual chunking example (before/after header); (7) Corrective-RAG crew diagram with loop bounds; (8) OpenWebUI integration + streaming UX (think-block screenshot placeholder → replace with real screenshot); (9) Observability: Phoenix trace screenshot; (10) PromptOps flow; (11) Evaluation results table (from `doc/evaluation-report.md`) + caveats; (12) Trade-offs & future work (GPU models, reranking, semantic caching, multi-tenant). `doc/presentation/README.md`: render with `npx @marp-team/marp-cli deck.md -o deck.pdf` (or present the .md directly); note where to drop the two screenshots.
+- [ ] **Step 1: Write the Marp deck** — `doc/presentation/deck.md` with `marp: true` front-matter, ~12 slides: (1) DocuMind title + one-liner; (2) Problem & requirements; (3) Architecture diagram (reuse Mermaid or ASCII); (4) Mandated-stack mapping table (tool → where it lives in the repo); (5) Ingestion pipeline; (6) Contextual chunking example (before/after header); (7) Corrective-RAG crew diagram with loop bounds; (8) OpenWebUI integration + streaming UX (think-block screenshot placeholder → replace with real screenshot); (9) Observability: Phoenix trace screenshot; (10) PromptOps flow; (11) Evaluation results table (from `doc/evaluation-report.md`) + caveats; (12) Trade-offs & future work (GPU models, reranking, semantic caching, multi-tenant). `doc/presentation/README.md`: render with `npx @marp-team/marp-cli deck.md -o deck.pdf` (or present the .md directly); note where to drop the two screenshots.
 
 - [ ] **Step 2: Capture screenshots** — OpenWebUI chat with expanded think-block + cited answer; Phoenix trace tree of one agentic query. Save as `doc/presentation/img/chat.png`, `doc/presentation/img/trace.png`; reference them in the deck.
 
@@ -3222,7 +3222,7 @@ docker compose down && docker compose up -d --build
 curl -s localhost:8000/health                                   # all deps true
 curl -s -X POST localhost:8000/api/v1/ingest -H "Authorization: Bearer <key>"   # 202, poll job to completed
 curl -s localhost:8000/v1/models -H "Authorization: Bearer <key>"               # agentic-rag listed
-# OpenWebUI chat at :REDACTED answers with citations; Phoenix :6006 shows the trace
+# OpenWebUI chat at :3000 answers with citations; Phoenix :6006 shows the trace
 cd backend && uv run pytest -m "not integration" -v             # all green
 RUN_INTEGRATION=1 uv run pytest -v                              # all green
 ```

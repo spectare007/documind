@@ -1,6 +1,6 @@
 # DocuMind — Design Specification
 
-**Date:** REDACTED-08-15
+**Date:** 2026-08-15
 **Status:** Approved for planning
 **Product:** DocuMind — a document search platform with an Agentic RAG backend, integrated with OpenWebUI as the chat frontend.
 
@@ -189,7 +189,7 @@ documind/
     ├── api.md + openapi.json  # REST API documentation
     ├── evaluation-report.md   # RAGAs results, agentic vs naive comparison
     ├── design-decisions.md    # ADR-style rationale
-    └── presentation/          # deck (REDACTEDp markdown → PDF/PPTX export)
+    └── presentation/          # deck (Marp markdown → PDF/PPTX export)
 ```
 
 ---

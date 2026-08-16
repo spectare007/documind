@@ -1,0 +1,127 @@
+[
+  {
+    "question": "What is Form No. 42 used for, according to the acknowledgement receipt in the knowledge base?",
+    "reference": "Form No. 42 is the Application for Certificate of residence for the purposes of an agreement under section 159(1) and 159(2).",
+    "category": "single-doc-factual"
+  },
+  {
+    "question": "What is the e-Filing Acknowledgement Number shown on the Form No. 42 acknowledgement receipt?",
+    "reference": "The e-Filing Acknowledgement Number is <REDACTED-ACK-NUMBER>.",
+    "category": "single-doc-numeric"
+  },
+  {
+    "question": "On what date was the Form No. 42 acknowledgement receipt e-filed?",
+    "reference": "The Form No. 42 acknowledgement receipt shows a date of e-Filing of <REDACTED-EFILING-DATE>.",
+    "category": "single-doc-factual"
+  },
+  {
+    "question": "What Tax Year is recorded on the Form No. 42 acknowledgement receipt?",
+    "reference": "The Tax Year recorded on the Form No. 42 acknowledgement receipt is 2026-27.",
+    "category": "single-doc-factual"
+  },
+  {
+    "question": "What Filing Type is shown on the Form No. 42 acknowledgement receipt: Original or Revised?",
+    "reference": "The Filing Type shown on the Form No. 42 acknowledgement receipt is Original.",
+    "category": "single-doc-factual"
+  },
+  {
+    "question": "How many attachments are listed in the Form No. 42 acknowledgement receipt's attachment table?",
+    "reference": "Three attachments are listed in the attachment table of the Form No. 42 acknowledgement receipt.",
+    "category": "single-doc-numeric"
+  },
+  {
+    "question": "According to the filed Form No. 42, what is the purpose of obtaining the Tax Residency Certificate (TRC)?",
+    "reference": "The purpose stated is to establish the applicant's status as a tax resident of India and to claim benefits under the applicable Double Taxation Avoidance Agreements (DTAAs) between India and the European countries.",
+    "category": "single-doc-factual"
+  },
+  {
+    "question": "What nationality is declared by the individual applicant on the filed Form No. 42?",
+    "reference": "The nationality declared on the filed Form No. 42 is <REDACTED-NATIONALITY>.",
+    "category": "single-doc-factual"
+  },
+  {
+    "question": "For what period is the Tax Residency Certificate applicable according to the filed Form No. 42?",
+    "reference": "The Tax Residency Certificate is applicable for the period <REDACTED-TRC-START-DATE> to <REDACTED-TRC-END-DATE>.",
+    "category": "single-doc-factual"
+  },
+  {
+    "question": "In the Verification section of the filed Form No. 42, in what capacity does the applicant say they are submitting the form: Individual or Company?",
+    "reference": "The applicant submits the form in the capacity of Individual.",
+    "category": "single-doc-factual"
+  },
+  {
+    "question": "Do the Form No. 42 acknowledgement receipt and the filed Form No. 42 refer to the same acknowledgement number?",
+    "reference": "Yes, both documents show acknowledgement number <REDACTED-ACK-NUMBER>.",
+    "category": "multi-doc"
+  },
+  {
+    "question": "What invoice number appears on the June 2026 invoice(s)?",
+    "reference": "The invoice number shown is <REDACTED-INVOICE-NUMBER>.",
+    "category": "single-doc-numeric"
+  },
+  {
+    "question": "What is the total amount on the June 2026 invoice?",
+    "reference": "The total amount on the June 2026 invoice is EUR <REDACTED-AMOUNT>.",
+    "category": "single-doc-numeric"
+  },
+  {
+    "question": "What single line item is billed on the June 2026 invoice?",
+    "reference": "The invoice bills one line item: <REDACTED-LINE-ITEM-DESCRIPTION> for the period <REDACTED-LINE-ITEM-START-DATE> to <REDACTED-LINE-ITEM-END-DATE>.",
+    "category": "single-doc-factual"
+  },
+  {
+    "question": "Compare the two June 2026 invoice files in the knowledge base (Invoice_June26.pdf and Invoice_June'26.pdf): do they show the same total amount?",
+    "reference": "Yes, both invoice files show the same total and payable amount of EUR <REDACTED-AMOUNT> for the same invoice number <REDACTED-INVOICE-NUMBER>.",
+    "category": "multi-doc"
+  },
+  {
+    "question": "What is the total number of hours recorded on the French timesheet template (Timesheet #<REDACTED-TIMESHEET-NUMBER>)?",
+    "reference": "The total number of hours recorded is <REDACTED-HOURS>.",
+    "category": "single-doc-numeric"
+  },
+  {
+    "question": "What timesheet number is shown on the French timesheet template?",
+    "reference": "The timesheet number shown is <REDACTED-TIMESHEET-NUMBER>.",
+    "category": "single-doc-numeric"
+  },
+  {
+    "question": "What week does the French timesheet template (#<REDACTED-TIMESHEET-NUMBER>) cover?",
+    "reference": "The timesheet covers the week from <REDACTED-WEEK-START-DATE> 12:00:00 AM to <REDACTED-WEEK-END-DATE> 12:00:00 AM.",
+    "category": "single-doc-factual"
+  },
+  {
+    "question": "On what date was the French timesheet (#<REDACTED-TIMESHEET-NUMBER>) submitted, and on what date was it approved?",
+    "reference": "The timesheet was submitted on <REDACTED-SUBMIT-DATE> and approved on <REDACTED-APPROVE-DATE>.",
+    "category": "single-doc-factual"
+  },
+  {
+    "question": "What is the designation/job title listed on the June 2026 payslip?",
+    "reference": "The designation listed on the June 2026 payslip is <REDACTED-JOB-TITLE>.",
+    "category": "single-doc-factual"
+  },
+  {
+    "question": "What payment mode is listed on the June 2026 payslip?",
+    "reference": "The payment mode listed on the June 2026 payslip is <REDACTED-PAYMENT-MODE>.",
+    "category": "single-doc-factual"
+  },
+  {
+    "question": "What pay cycle date range does the June 2026 payslip cover?",
+    "reference": "The June 2026 payslip covers the pay cycle from <REDACTED-PAY-CYCLE-START> to <REDACTED-PAY-CYCLE-END>.",
+    "category": "single-doc-factual"
+  },
+  {
+    "question": "What 'Date Joined' is listed on the June 2026 payslip?",
+    "reference": "The Date Joined listed on the June 2026 payslip is <REDACTED-DATE-JOINED>.",
+    "category": "single-doc-factual"
+  },
+  {
+    "question": "What is the company's current stock price today?",
+    "reference": "The knowledge base does not contain any stock price information.",
+    "category": "unanswerable"
+  },
+  {
+    "question": "What annual bonus amount is specified for the employee in 2026?",
+    "reference": "The knowledge base does not mention any annual bonus amount; none of the documents specify a bonus.",
+    "category": "unanswerable"
+  }
+]

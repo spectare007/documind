@@ -1,0 +1,76 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-documind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-documind}
+      POSTGRES_DB: ${POSTGRES_DB:-documind}
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U documind"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest
+    ports: ["11434:11434"]
+    volumes: [ollama_data:/root/.ollama]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama: {condition: service_healthy}
+    environment: {OLLAMA_HOST: "http://ollama:11434"}
+    entrypoint: >
+      sh -c "ollama pull qwen2.5:3b &&
+             ollama pull nomic-embed-text &&
+             ollama pull qwen2.5:7b"
+    restart: "no"
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    ports: ["6006:6006", "4317:4317"]
+    volumes: [phoenix_data:/mnt/data]
+    environment:
+      PHOENIX_WORKING_DIR: /mnt/data
+
+  backend:
+    build: ./backend
+    ports: ["8000:8000"]
+    env_file: .env
+    environment:
+      DOCUMIND_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-documind}:${POSTGRES_PASSWORD:-documind}@postgres:5432/${POSTGRES_DB:-documind}
+      DOCUMIND_OLLAMA_BASE_URL: http://ollama:11434
+      DOCUMIND_PHOENIX_BASE_URL: http://phoenix:6006
+    volumes:
+      - ./data:/app/data
+      - ./prompts:/app/prompts
+      - hf_cache:/root/.cache
+    depends_on:
+      postgres: {condition: service_healthy}
+      ollama: {condition: service_healthy}
+
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    ports: ["3000:8080"]
+    environment:
+      OPENAI_API_BASE_URL: http://backend:8000/v1
+      OPENAI_API_KEY: ${DOCUMIND_API_KEY:-documind-dev-key}
+      ENABLE_OLLAMA_API: "false"
+      WEBUI_AUTH: "false"
+    volumes: [openwebui_data:/app/backend/data]
+    depends_on: [backend]
+
+volumes:
+  pgdata:
+  ollama_data:
+  phoenix_data:
+  hf_cache:
+  openwebui_data:
