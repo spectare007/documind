@@ -53,6 +53,19 @@ def test_ingest_file_indexes_contextualized_chunks(session_factory, tmp_path):
         assert (rec.status, rec.chunk_count, rec.page_count) == ("completed", 2, 2)
 
 
+def test_ingest_file_records_embedding_model_on_chunk_metadata(session_factory, tmp_path):
+    """A future embedding-model change must be detectable rather than silently
+    mixing vector spaces, so every chunk's metadata records which model built
+    its vector (see `Settings.embed_model` and `doc/architecture.md`)."""
+    from app.core.config import get_settings
+    pdf = tmp_path / "a.pdf"; pdf.write_bytes(b"%PDF-fake")
+    pipeline, store = _pipeline(session_factory, tmp_path)
+    pipeline.ingest_file(pdf)
+
+    nodes = store.add.call_args.args[0]
+    assert all(n.metadata["embedding_model"] == get_settings().embed_model for n in nodes)
+
+
 def test_run_skips_unchanged_and_isolates_failures(session_factory, tmp_path):
     good, bad = tmp_path / "good.pdf", tmp_path / "bad.pdf"
     good.write_bytes(b"%PDF-1"); bad.write_bytes(b"%PDF-2")

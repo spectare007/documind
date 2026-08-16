@@ -104,7 +104,30 @@ class JobRepository:
         job.completed_documents, job.failed_documents = completed, failed
         self.session.flush()
 
-    def finish(self, job_id: str, status: str) -> None:
+    def finish(self, job_id: str, status: str, error: str | None = None) -> None:
         job = self._require(job_id)
         job.status, job.finished_at = status, utcnow()
+        if error is not None:
+            job.error = error
         self.session.flush()
+
+    def reconcile_interrupted(self) -> list[str]:
+        """Fail every job still `running`, on the assumption it was orphaned
+        by a process restart.
+
+        Ingest jobs run on a daemon thread (`app.api.ingest.start_ingest`), so
+        a restart kills the thread mid-run without ever reaching `finish()`,
+        leaving its row `running` forever with no worker left to finish it.
+        Called once at startup (`app.main.lifespan`) so a stuck row surfaces
+        as an honest, explained `failed` status instead of looking like it is
+        still in progress indefinitely. Returns the ids of the jobs it failed.
+        """
+        stuck = list(
+            self.session.scalars(select(IngestJob).where(IngestJob.status == "running"))
+        )
+        for job in stuck:
+            job.status = "failed"
+            job.error = "Interrupted by a server restart before the job could finish."
+            job.finished_at = utcnow()
+        self.session.flush()
+        return [job.id for job in stuck]

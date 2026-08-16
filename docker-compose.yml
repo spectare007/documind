@@ -8,13 +8,17 @@ services:
     ports: ["5432:5432"]
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U documind"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-documind}"]
       interval: 5s
       timeout: 3s
       retries: 10
 
+  # Pinned to the version running at the time this pin was written (verified
+  # against the live container: `ollama --version` -> 0.32.13), not `latest`,
+  # so the stack can't break on an unannounced upstream release.
+  # ollama/ollama:0.32.13 == sha256:77f1a2a54460f0380f2611e1464233d9b82cb6e58afc8f60abec0061049d2d82
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.32.13
     ports: ["11434:11434"]
     volumes: [ollama_data:/root/.ollama]
     healthcheck:
@@ -24,7 +28,7 @@ services:
       retries: 12
 
   ollama-init:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.32.13
     depends_on:
       ollama: {condition: service_healthy}
     environment: {OLLAMA_HOST: "http://ollama:11434"}
@@ -34,8 +38,11 @@ services:
              ollama pull qwen2.5:7b"
     restart: "no"
 
+  # Pinned to the version running at the time this pin was written (verified
+  # against the live container: `phoenix.__version__` -> 20.2.1), not `latest`.
+  # arizephoenix/phoenix:version-20.2.1 == sha256:5ae3c414e8ee7ee47caa022edf8e94bdef7a90634a4e914a99dbe9d1f70790b8
   phoenix:
-    image: arizephoenix/phoenix:latest
+    image: arizephoenix/phoenix:version-20.2.1
     ports: ["6006:6006", "4317:4317"]
     volumes: [phoenix_data:/mnt/data]
     environment:
@@ -57,8 +64,14 @@ services:
       postgres: {condition: service_healthy}
       ollama: {condition: service_healthy}
 
+  # Pinned by digest, not tag: the running container was built from `main`
+  # (no released version tag matches this exact build; the closest release,
+  # per its own package.json, is the not-yet-tagged 0.11.0), so the digest is
+  # the only reproducible reference. Re-verify with
+  # `docker inspect ghcr.io/open-webui/open-webui:main --format '{{.RepoDigests}}'`
+  # against a running container before bumping.
   openwebui:
-    image: ghcr.io/open-webui/open-webui:main
+    image: ghcr.io/open-webui/open-webui@sha256:6a773e5c3a246b65cbe74ce942b294292c0e5f81c138f703d111bc162f7d7c3d
     ports: ["3000:8080"]
     environment:
       OPENAI_API_BASE_URL: http://backend:8000/v1

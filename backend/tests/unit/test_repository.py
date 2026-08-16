@@ -78,3 +78,31 @@ def test_job_mutator_raises_for_unknown_id(session):
     repo = JobRepository(session)
     with pytest.raises(RecordNotFoundError):
         repo.update_progress("does-not-exist", completed=1, failed=0)
+
+
+def test_reconcile_interrupted_fails_only_running_jobs(session):
+    """Startup reconciliation: a job left `running` by a killed daemon thread
+    (see `app.api.ingest.start_ingest`) is marked `failed` with an explained
+    error, while jobs that already finished are left untouched."""
+    from app.db.repository import JobRepository
+    repo = JobRepository(session)
+    stuck = repo.create()
+    already_done = repo.create()
+    repo.finish(already_done.id, status="completed")
+
+    reconciled_ids = repo.reconcile_interrupted()
+
+    assert reconciled_ids == [stuck.id]
+    got_stuck = repo.get(stuck.id)
+    assert got_stuck.status == "failed"
+    assert got_stuck.error and "restart" in got_stuck.error.lower()
+    assert got_stuck.finished_at is not None
+    got_done = repo.get(already_done.id)
+    assert got_done.status == "completed" and got_done.error is None
+
+
+def test_reconcile_interrupted_is_a_no_op_when_nothing_is_stuck(session):
+    from app.db.repository import JobRepository
+    repo = JobRepository(session)
+    repo.finish(repo.create().id, status="completed")
+    assert repo.reconcile_interrupted() == []

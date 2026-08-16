@@ -124,6 +124,7 @@ class IngestionPipeline:
         parsed = self.parse(path, max_tokens=self.chunk_max_tokens)
         texts = [contextualize(c, parsed.title) for c in parsed.chunks]
         embeddings = self.embed.get_text_embedding_batch(texts, show_progress=False)
+        embedding_model = get_settings().embed_model
 
         nodes = []
         for chunk, text, emb in zip(parsed.chunks, texts, embeddings):
@@ -138,6 +139,10 @@ class IngestionPipeline:
                         "section_path": " > ".join(chunk.section_path),
                         "pages": chunk.pages,
                         "is_table": chunk.is_table,
+                        # Recorded so a future embedding-model change is
+                        # detectable rather than silently mixing vector
+                        # spaces: no retrieval-time filtering reads this yet.
+                        "embedding_model": embedding_model,
                     },
                     relationships={
                         NodeRelationship.SOURCE: RelatedNodeInfo(node_id=doc_id)

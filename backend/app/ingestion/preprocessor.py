@@ -23,6 +23,12 @@ _converter: DocumentConverter | None = None
 _converter_lock = threading.RLock()
 
 # docling 2.120.x default tokenizer for HybridChunker when none is supplied.
+# This counts tokens with all-MiniLM-L6-v2's tokenizer, not nomic-embed-text's
+# (the actual embedding model, configured via Settings.embed_model). The 512
+# cap is therefore enforced in a different tokenizer's token units. Safe in
+# practice: nomic-embed-text's context window is 8192 tokens, far larger than
+# any chunk this cap can produce, so the mismatch cannot silently truncate an
+# embedding input.
 _DEFAULT_TOKENIZER_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 

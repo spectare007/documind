@@ -228,6 +228,18 @@ RUN_INTEGRATION=1 uv run pytest
 
 **Running the backend itself outside Docker:** `Settings.data_dir` (`data/documents`) and `Settings.prompts_dir` (`prompts`) are relative paths, resolved against the process's current working directory. Inside the container this is `/app` and both are mounted there, so it just works. Locally, either start `uvicorn` from the **repo root** (not from `backend/`), or set `DOCUMIND_DATA_DIR`/`DOCUMIND_PROMPTS_DIR` to absolute paths in your `.env`.
 
+**No migration tool: schema changes do not apply to an existing database.** `init_db()` (`app/db/session.py`) only calls SQLAlchemy's `Base.metadata.create_all()` at boot, which creates tables that don't exist yet but never alters one that already does. If you have a running deployment from before a schema-affecting change (for example the document-identity fix that made `filename` unique on `documents` and dropped the old uniqueness constraint on `sha256`), your existing `pgdata` volume keeps the old schema forever and the app may misbehave against it. There is no Alembic (or other migration tool) in this project yet; adding one is future work. The honest remedy today for an existing deployment hitting this is to drop the volume and re-ingest from source PDFs:
+
+```bash
+docker compose down
+docker volume rm documind_pgdata
+docker compose up -d
+# re-ingest once postgres/ollama are healthy
+curl -X POST http://localhost:8000/api/v1/ingest -H "Authorization: Bearer <your-key>"
+```
+
+This is destructive (it deletes the ledger and every indexed chunk) and only acceptable because re-ingestion from `data/documents/` is cheap and idempotent here. A real production deployment would need a proper migration tool (Alembic is the natural choice for this SQLAlchemy stack) instead of this drop-and-reingest workaround.
+
 **Repository layout:**
 
 ```

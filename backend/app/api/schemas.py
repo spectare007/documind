@@ -17,6 +17,7 @@ class DocumentOut(BaseModel):
 class JobOut(BaseModel):
     id: str
     status: str
+    error: str | None = None
     total_documents: int
     completed_documents: int
     failed_documents: int

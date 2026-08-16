@@ -4,106 +4,74 @@ Registers an OpenTelemetry TracerProvider that exports spans to Arize
 Phoenix over OTLP-HTTP under the `documind` project, then attempts to attach
 OpenInference/OpenTelemetry auto-instrumentation for FastAPI (the ASGI
 request layer), CrewAI, LlamaIndex, LiteLLM and the OpenAI SDK, so both
-inbound HTTP requests and agent/LLM calls (the OpenAI-compatible chat API,
-the agentic pipeline, and the streaming/chat layer) show up as spans
-automatically.
+inbound HTTP requests and agent/LLM calls show up as spans automatically.
 
-WHY BOTH LiteLLM *AND* OpenAI INSTRUMENTORS (fix for a review finding):
-"trace all inference calls" was not actually satisfied before. On crewai
-1.x, `crewai.LLM(model="ollama/...", base_url=...)` is a factory that
-returns a *native provider* -- `OpenAICompatibleCompletion` -- which calls
-the `openai` SDK directly against Ollama's OpenAI-compatible `/v1`
-endpoint. It never touches LiteLLM; litellm is not even installed (it
-became an optional `crewai[litellm]` extra), so `LiteLLMInstrumentor`
-attaches to nothing and logs a `DependencyConflict` at startup. The result
-was a Phoenix trace tree with CHAIN/AGENT/TOOL spans but *zero* LLM spans:
-no prompts, no completions, no token counts. `OpenAIInstrumentor` patches
-the SDK crewai actually calls, which restores them. LiteLLM's instrumentor
-is kept because it costs nothing when absent and would cover any future
-model that does route through LiteLLM.
+Both LiteLLM and OpenAI instrumentors are attached: on crewai 1.x,
+`crewai.LLM(model="ollama/...", ...)` calls the `openai` SDK directly
+against Ollama's OpenAI-compatible endpoint rather than going through
+LiteLLM (which isn't even installed by default), so `OpenAIInstrumentor` is
+what actually produces LLM spans (prompts, completions, token counts).
+`LiteLLMInstrumentor` is kept in case a future model routes through it; it
+costs nothing when its target library is absent.
 
-The FastAPI instrumentor is what actually creates the root "server span" for
-each HTTP request -- without it there is no active OTel span during request
-handling at all, so `CorrelationIdMiddleware`'s `trace.get_current_span()`
-call would always see a no-op, non-recording span and the `correlation.id`
-attribute would never actually land anywhere. `FastAPIInstrumentor.
-instrument_app(app, ...)` wraps the *specific* app instance's ASGI callable
-outside of every `add_middleware`-registered middleware by monkey-patching
-`app.build_middleware_stack` so `OpenTelemetryMiddleware` sits outside
-`ServerErrorMiddleware -> [user middlewares] -> router`, so the server span
-is already current by the time `CorrelationIdMiddleware.dispatch()` runs,
-both before and after `call_next()` -- confirmed with an `InMemorySpanExporter`
-in `tests/unit/test_middleware.py`.
+The FastAPI instrumentor creates the root "server span" for each HTTP
+request -- without it `CorrelationIdMiddleware`'s `trace.get_current_span()`
+always sees a no-op span and `correlation.id` never lands anywhere.
+`FastAPIInstrumentor.instrument_app()` places `OpenTelemetryMiddleware`
+outside every `add_middleware`-registered middleware by monkey-patching
+`app.build_middleware_stack`, confirmed with an `InMemorySpanExporter` in
+`tests/unit/test_middleware.py`.
 
-CALLER TIMING REQUIREMENT: `setup_tracing(app)` must be called before `app`
-receives its first ASGI call of *any* kind. Starlette's `Starlette.__call__`
-does `if self.middleware_stack is None: self.middleware_stack =
-self.build_middleware_stack()` -- and for uvicorn, the very first such call
-is the ASGI *lifespan* startup call, i.e. exactly the call that runs our
-`lifespan()` context manager. Calling `setup_tracing(app)` from inside
-`lifespan()` therefore patches `build_middleware_stack` **after** Starlette
-has already built and cached the original, uninstrumented stack on that same
-call -- `_is_instrumented_by_opentelemetry` gets set and no exception is
-raised, but the patched method is never invoked again, so real HTTP requests
-silently get no server span at all. `app.main.create_app()` calls
-`setup_tracing(app)` synchronously, before returning `app`, specifically to
-avoid this trap.
+CALLER TIMING REQUIREMENT: `setup_tracing(app)` must run before `app`
+receives its first ASGI call of *any* kind. Starlette caches
+`self.middleware_stack` on that very first call -- which, for uvicorn, is
+the ASGI *lifespan* startup call, i.e. the same call that runs our
+`lifespan()` context manager. Instrumenting from inside `lifespan()`
+therefore patches `build_middleware_stack` **after** Starlette has already
+built and cached the uninstrumented stack: `_is_instrumented_by_opentelemetry`
+gets set, no exception is raised, but the patched method is never invoked
+again, so real requests silently get no server span at all.
+`app.main.create_app()` calls `setup_tracing(app)` synchronously, before
+returning `app`, specifically to avoid this trap.
 
 Tracing is always best-effort: `setup_tracing()` must never raise, must
-return quickly even when Phoenix is unreachable (span export is async/
-batched, so `register()` does not block on connectivity), and must be safe
-to call more than once (e.g. once per FastAPI app instance created in
-tests). Each instrumentor is attempted independently: a CrewAI-version
-mismatch (or any other single instrumentor failure) must not prevent the
-other instrumentors from being attached.
+return quickly even when Phoenix is unreachable, and must be safe to call
+more than once (e.g. once per FastAPI app instance created in tests). Each
+instrumentor is attempted independently: a CrewAI-version mismatch (or any
+other single instrumentor failure) must not prevent the rest.
 
-TWO DIFFERENT LIFETIMES, TWO DIFFERENT GUARDS (fix for a review finding):
-`register()` and the process-wide OpenInference instrumentors (CrewAI,
-LlamaIndex, LiteLLM) really are process-global and correctly run at most
-once -- re-registering a tracer provider or re-patching a third-party
-*library* on every `create_app()` call would be wasteful and, for some
-instrumentors, unsafe. Those stay behind the module-level `_initialized`
-flag, exactly as before. FastAPI/ASGI instrumentation is different: it
-patches a *specific app instance's* `build_middleware_stack`, so gating it
-behind the same process-wide flag means every `create_app()` after the
-first produces a completely untraced app -- no root server span, ever, for
-the lifetime of the process. This bit in practice: `app.main`'s
-module-level `app = create_app()` (needed for `uvicorn app.main:app`)
-consumes the one-shot flag on import, so any *second* `create_app()` in the
-same process -- e.g. every `TestClient(create_app())` fixture in this test
-suite -- silently got a `NonRecordingSpan` (trace_id all zeros) for every
-request, while direct callers of the module-level `app` got a real span.
-`setup_tracing(app)` therefore now instruments the given `app` on *every*
-call, independent of `_initialized`. This is safe to repeat because
-`FastAPIInstrumentor.instrument_app()` carries its own per-app guard
-(`app._is_instrumented_by_opentelemetry`) -- instrumenting the same app
-twice is already a no-op by the library's own design, so the extra
-process-wide flag around this specific step bought nothing and broke every
-second app instance. See `tests/unit/test_tracing.py::
-test_second_create_app_in_same_process_still_gets_a_real_traced_span` for
-the regression test (in-memory exporter, asserts on the exported span's
-actual trace id, not just that instrumentation "succeeded" without an
-exception).
+TWO DIFFERENT LIFETIMES, TWO DIFFERENT GUARDS: `register()` and the
+process-wide OpenInference instrumentors (CrewAI, LlamaIndex, LiteLLM) are
+genuinely process-global, so they run at most once, behind the module-level
+`_initialized` flag. FastAPI/ASGI instrumentation is different: it patches a
+*specific app instance's* `build_middleware_stack`, so gating it behind the
+same flag left every `create_app()` after the first completely untraced --
+in practice, every `TestClient(create_app())` fixture in this suite got a
+`NonRecordingSpan` (trace_id all zeros) while the module-level `app` (which
+consumed the one-shot flag on import) got a real one. `setup_tracing(app)`
+therefore instruments the given `app` on *every* call, independent of
+`_initialized`; this is safe because `FastAPIInstrumentor.instrument_app()`
+already no-ops on an app it has instrumented before. See
+`tests/unit/test_tracing.py::
+test_second_create_app_in_same_process_still_gets_a_real_traced_span`.
 
 --- Deliberate, documented exception to "no os.environ reads in app code" ---
 
 Importing CrewAI (transitively, via its OpenInference instrumentor) runs
 `crewai.llm`'s module-level `dotenv.load_dotenv()`, which walks up from the
-current working directory and -- in this repo layout -- finds and loads the
-repo-root `.env` (meant for docker-compose variable substitution) into the
-real process environment, e.g. leaking `DOCUMIND_API_KEY=change-me`. Since
-real env vars outrank pydantic-settings' own `env_file=".env"` lookup, that
-silently overrides every `get_settings()` call for the rest of the process
-(this was caught because it broke API-key auth in tests that ran after
-tracing setup). `setup_tracing()` snapshots `os.environ` before
-instrumenting and scrubs (`_scrub_env_pollution`, from `app.core.env_guard`)
-any keys that appear afterward, so this specific third-party import side
-effect can never leak into our config.
+current working directory and -- in this repo layout -- loads the repo-root
+`.env` (meant only for docker-compose variable substitution) into the real
+process environment, e.g. leaking `DOCUMIND_API_KEY=change-me`. Real env
+vars outrank pydantic-settings' own `env_file` lookup, so this silently
+overrode every `get_settings()` call for the rest of the process (caught
+because it broke API-key auth in tests run after tracing setup).
+`setup_tracing()` snapshots `os.environ` before instrumenting and scrubs
+(`_scrub_env_pollution`, from `app.core.env_guard`) any keys that appear
+afterward, so this side effect can never leak into our config.
 
 `app.core.env_guard` is the single place in the codebase that reads/mutates
 `os.environ`, holds the full rationale, and is shared with `app.agents`,
-which imports CrewAI itself (not just its instrumentor) and needs exactly
-the same containment.
+which imports CrewAI directly and needs the same containment.
 """
 
 import logging
@@ -217,23 +185,14 @@ def _instrument_fastapi_app(app: "FastAPI", tracer_provider) -> None:
 def _trace_config():
     """Build the OpenInference `TraceConfig` that honors `Settings.trace_content`.
 
-    Fix for a review finding: the corpus here is real personal financial
-    documents (payslips, invoices, a filed tax form), and Phoenix's
-    `phoenix_data` volume had no retention policy and no way to turn content
-    capture off. Rather than inventing a bespoke redaction layer, this uses
-    OpenInference's own supported masking mechanism (`openinference-
-    instrumentation`'s `TraceConfig`, passed as each instrumentor's `config`
-    kwarg -- see every call site below): when `trace_content` is False,
-    `hide_inputs`/`hide_outputs` redact LLM prompts, completions and every
-    generic input/output span value (which is where retrieved chunk text
-    surfaces on retriever/chain spans), and `hide_embeddings_text` redacts
-    the raw text sent to the embedding model. None of that touches span
-    names, timings, status, or the token-count attributes
-    (`llm.token_count.*`), which live on separate attributes `TraceConfig`
-    never masks -- so span structure, timings and token counts are exported
-    either way. Called fresh by each instrumentor closure below (not cached)
-    so a `Settings` change under test (or via a future admin reload) is
-    picked up without restarting the process.
+    Uses OpenInference's own masking mechanism rather than a bespoke
+    redaction layer: when `trace_content` is False, `hide_inputs`/
+    `hide_outputs` redact LLM prompts, completions and retrieved chunk text,
+    and `hide_embeddings_text` redacts the raw text sent to the embedding
+    model. Span names, timings, status and token counts are on separate
+    attributes `TraceConfig` never masks, so those still export either way.
+    Called fresh by each instrumentor closure below (not cached) so a
+    `Settings` change under test is picked up without a restart.
     """
     from openinference.instrumentation import TraceConfig
 

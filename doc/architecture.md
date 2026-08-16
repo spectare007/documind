@@ -180,6 +180,7 @@ erDiagram
     ingest_jobs {
         string id PK "uuid4 hex"
         string status "running|completed|failed"
+        text error "nullable; set by startup\nreconciliation for a job left\nrunning by a killed process,\nor by a crashed run"
         int total_documents
         int completed_documents
         int failed_documents
@@ -189,7 +190,7 @@ erDiagram
     data_rag_chunks {
         bigint id PK
         varchar text "contextualized chunk text"
-        json metadata_ "doc_id, title, filename,\nsection_path, pages, is_table,\nref_doc_id, node/document ids"
+        json metadata_ "doc_id, title, filename,\nsection_path, pages, is_table,\nembedding_model, ref_doc_id,\nnode/document ids"
         varchar node_id
         vector embedding "768-dim, HNSW cosine index"
         tsvector text_search_tsv "GIN index, english config"

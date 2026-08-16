@@ -91,49 +91,6 @@ def parse_queries(text: str, fallback: str = "") -> list[str]:
     return [fallback] if fallback else []
 
 
-def parse_indices(text: str, n_chunks: int) -> list[int]:
-    """Relevant chunk indices from a JSON-array reply, failing open.
-
-    NOTE: `grade()` no longer calls this -- it now asks for one binary
-    verdict per chunk (see its docstring for the measurements that forced
-    that change) and uses `parse_relevance_verdict`. This stays as a public, tested
-    parse helper for any caller that does get an array-of-indices reply
-    (e.g. the RAGAs evaluation harness scoring a larger model, which handles
-    the array form fine); it is the only parser here that reads one.
-
-    Three cases, and the distinction between the last two matters:
-
-    * no JSON array at all -> keep every chunk. A grader that cannot answer
-      in format must not be able to starve the synthesizer.
-    * an explicit empty array -> keep nothing. This is a real judgment and is
-      respected: it is what triggers the corrective retrieval retry.
-    * a non-empty array whose entries are *all* out of range -> keep every
-      chunk. This is a malformed reply wearing the right punctuation, not a
-      judgment of irrelevance, so it gets the same fail-open treatment as an
-      unparseable one. Observed live: given one chunk, qwen2.5:3b copies the
-      `e.g. [0, 2]` example out of the grader prompt and answers `[2]`, which
-      would otherwise silently reduce to "nothing is relevant" and make the
-      whole pipeline answer "I couldn't find anything" for a corpus that does
-      contain the answer.
-
-    Mixed replies (`[0, 9]` over 3 chunks) keep the valid entries and drop the
-    rest -- there the in-range index is real signal.
-    """
-    arr = _extract_json_array(text)
-    if arr is None:
-        return list(range(n_chunks))
-    indices = sorted(
-        {int(i) for i in arr if isinstance(i, (int, float)) and 0 <= int(i) < n_chunks}
-    )
-    if arr and not indices:
-        logger.warning(
-            "grader returned %r: no index in range 0..%d; keeping all chunks",
-            arr, n_chunks - 1,
-        )
-        return list(range(n_chunks))
-    return indices
-
-
 def parse_verdict(text: str) -> bool:
     """Groundedness verdict, failing open: only an explicit "no" blocks."""
     return not text.strip().lower().startswith("no")
@@ -260,60 +217,38 @@ class CrewStages:
         per chunk, single-token output, called as a *direct* LLM completion
         rather than through a CrewAI Agent/Task like every other stage.
 
-        Three iterations got here, each one measured live against the
-        deployed qwen2.5:3b, not assumed:
+        Direct LLM completion, not a CrewAI `Agent`/`Task` like every other
+        stage -- three iterations got here, measured live against qwen2.5:3b:
 
-        1. JSON-array form ("reply with [0, 2]") is unusable on a 3B model
-           once CrewAI appends its expected-output boilerplate to the task:
-           qwen2.5:3b answered `[]` to *every* input -- relevant chunk,
-           irrelevant chunk, no chunk -- which made the whole pipeline say
-           "I couldn't find anything" for a corpus that did contain the
-           answer.
-        2. A rewording to one yes/no verdict per chunk, still run through
-           the same `_kickoff()` (`Agent`+`Task`+`Crew`) path as every other
-           stage, did not fix it: it still answered "no" for essentially
-           every chunk regardless of content. The cause was not the
-           question's wording -- it was CrewAI's own scaffolding. Isolating
-           the variables live showed the injected system message
-           (role+goal) alone flips this model negative independent of
-           content: even the control question "Is grass green? Answer YES
-           or NO." answered "no" once that system message was present, and
-           "yes" with it removed. Sidestepping the vocabulary (asking for
-           RELEVANT/IRRELEVANT instead of yes/no) only produced a different
-           failure: the model settled on "IRRELEVANT" for every chunk, which
-           doesn't start with "no", so the fail-open parser kept everything
-           -- a rubber-stamp grader, not a discriminating one, and an
-           inverted-semantics near miss (see `parse_relevance_verdict`).
-        3. Removing the CrewAI Agent/Task wrapper entirely for this one
-           stage -- a direct `self.llm.call(...)` completion, no system
-           message, no expected-output footer -- restored genuine per-chunk
-           discrimination: 6/6 correct live (both true-positive and
-           true-negative), including on a genuinely unanswerable question.
-           Grading is a binary classifier with no goal, no tools, no
-           delegation and no multi-step reasoning, so an agent framing was
-           never buying anything here; the other five roles keep using
-           `_kickoff()` and the multi-agent architecture is otherwise
-           unchanged. This docstring is the full record, deliberately
-           including the near-miss, so the failure mode isn't lost to a
-           future refactor.
+        1. JSON-array form ("reply with [0, 2]") is unusable once CrewAI
+           appends its expected-output boilerplate: the model answered `[]`
+           to every input regardless of relevance.
+        2. A yes/no rewording, still run through `_kickoff()`
+           (`Agent`+`Task`+`Crew`), didn't fix it either. The cause was
+           CrewAI's own scaffolding: its injected system message (role+goal)
+           alone flips this model negative independent of content, even on
+           the control question "Is grass green? Answer YES or NO." Swapping
+           the vocabulary to RELEVANT/IRRELEVANT traded that for a different
+           failure -- the model settled on "IRRELEVANT" for everything, which
+           doesn't start with "no", so the fail-open parser kept every chunk:
+           a rubber-stamp grader wearing a discriminating one's clothes (see
+           `parse_relevance_verdict`).
+        3. Removing the Agent/Task wrapper -- a direct `self.llm.call(...)`,
+           no system message, no expected-output footer -- restored genuine
+           per-chunk discrimination (6/6 correct live, both directions).
+           Grading is a binary classifier with no goal or tools, so the agent
+           framing bought nothing here; the other five roles are unaffected.
 
         Bounded on purpose: at most `retrieval_top_k` chunks are graded (or
-        `top_k`, the per-request override, when one is given), highest-scoring
-        first, so a broad retrieval cannot turn one request into a dozen
-        sequential CPU completions. The cap follows the same number that
-        bounded retrieval, so asking for more chunks does not leave the extra
-        ones silently ungraded and discarded. Returned indices always address
-        the *caller's* list, so the signature and semantics are unchanged from
-        the array version.
+        `top_k` if given), highest-scoring first, so a broad retrieval can't
+        turn one request into a dozen sequential CPU completions.
 
         Fails open per chunk via `parse_relevance_verdict`: only an explicit
-        "yes" keeps a chunk that the parser can read, and a raised exception
-        (LLM call failed) also keeps it rather than silently dropping it --
-        see that function's docstring for why this needed its own parser
-        instead of reusing `parse_verdict`. An empty result therefore means
-        every graded chunk was explicitly rejected -- a real judgment, which
-        is what drives the corrective retrieval retry -- and can never be an
-        artifact of a model answering off-format or a transient LLM failure.
+        "yes" keeps a chunk, and a raised exception (LLM call failed) also
+        keeps it. An empty result therefore means every graded chunk was
+        explicitly rejected -- the real judgment that drives the corrective
+        retrieval retry -- never an artifact of an off-format reply or a
+        transient failure.
         """
         if not chunks:
             return []

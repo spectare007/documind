@@ -8,45 +8,33 @@ not re-implement any pipeline logic.
 
 --- Streaming status updates ---
 
-The agentic pipeline is slow (30-60s on CPU) and calls `on_status(msg)` at
-each stage boundary (router, rewrite, retrieve, grade, synthesize, check --
-see `app.pipelines.agentic`). OpenWebUI renders any `<think>...</think>`
-span in assistant content as a collapsible "thinking" panel, so status
-updates are streamed as individual chunks *inside* an open `<think>` block
-while the pipeline runs in a background thread; once it finishes, the block
-is closed and the final answer + source list stream in afterwards. This is
-the entire reason the chat UI feels alive during a long-running answer --
-without it, OpenWebUI would just show nothing for up to a minute.
+The agentic pipeline calls `on_status(msg)` at each stage boundary (router,
+rewrite, retrieve, grade, synthesize, check). OpenWebUI renders any
+`<think>...</think>` span in assistant content as a collapsible "thinking"
+panel, so status updates stream as chunks inside an open `<think>` block
+while the pipeline runs in a background thread; without this, OpenWebUI
+would show nothing for up to a minute.
 
-The pipeline run is submitted to a dedicated bounded executor
-(`_get_stream_executor`) rather than run directly on this coroutine, so a
-client that aborts or refreshes mid-stream (the normal case for a 30-60s
-answer, not an edge case) doesn't leak the in-flight run forever: the
-generator's `finally` clause (see `chat_completions`) attempts real
-cancellation and, if the run is already executing and can't be interrupted,
-attaches a done-callback so its eventual result is still retrieved and
-logged instead of silently accumulating.
+The run is submitted to a dedicated bounded executor (`_get_stream_executor`)
+rather than run directly on this coroutine, so a client that aborts
+mid-stream doesn't leak the in-flight run forever: the generator's `finally`
+clause attempts real cancellation and, if the run is already executing and
+can't be interrupted, attaches a done-callback so its result is still
+retrieved and logged instead of silently accumulating.
 
 --- LLM-unavailable handling ---
 
 `app.api.query.query()` catches `LLM_UNAVAILABLE_ERRORS` and returns a
-structured 503. The non-streaming path here does the same, for parity with
-that endpoint and because a plain JSON response has not been sent yet when
-the error is raised, so a real HTTP error status is still possible.
+structured 503; the non-streaming path here does the same.
 
-The streaming path is different: by the time an LLM-unavailable error could
-occur, `StreamingResponse` has already sent a 200 status and the opening
-`<think>` chunk -- HTTP does not allow changing the status code after that.
-So instead of letting the exception escape (which would just drop the
-connection and look like a hang to the user), the generator catches
-`LLM_UNAVAILABLE_ERRORS` *and* any other unexpected exception, emits the
-failure as visible text inside the still-open `<think>` block (or, if the
-think block was already closed, as a plain content chunk), and then ends the
-stream cleanly with a `finish_reason: "stop"` chunk and `data: [DONE]` --
-exactly like a normal completion, just with an apologetic message instead of
-an answer. This keeps every stream well-formed for any OpenAI-compatible
-client, which is more important than distinguishing "we failed" from "here is
-the answer" at the transport level once streaming has already started.
+The streaming path can't: by the time an LLM-unavailable error could occur,
+`StreamingResponse` has already sent a 200 and the opening `<think>` chunk,
+and HTTP doesn't allow changing the status after that. So the generator
+catches `LLM_UNAVAILABLE_ERRORS` and any other unexpected exception, emits
+the failure as visible text inside (or after) the `<think>` block, and ends
+the stream cleanly with `finish_reason: "stop"` and `data: [DONE]` -- a
+well-formed stream for any OpenAI-compatible client matters more here than
+distinguishing "we failed" from "here is the answer" at the transport level.
 """
 
 import asyncio
@@ -146,18 +134,14 @@ def _get_stream_executor() -> ThreadPoolExecutor:
     """Bounded, dedicated thread pool for agentic pipeline runs started by
     the streaming chat endpoint.
 
-    Deliberately separate from asyncio's shared default executor (which
-    `asyncio.to_thread` -- used by this module's own non-streaming path and
-    by `/api/v1/query` -- and every other unqualified `run_in_executor(None,
-    ...)` call in the app also draws from). A `pipeline.answer()` already
-    executing on a worker thread cannot be interrupted mid-LLM-call, so a
-    client that disconnects mid-stream leaves its run occupying a thread
-    until it finishes or the agentic pipeline's `request_budget_seconds`
-    wall-clock budget gives up on it.
-    Isolating that thread pool means repeated aborts can only ever exhaust
-    *this* endpoint's capacity, never starve DB writes, ingestion, or other
-    request handling that shares the default pool. Sized via
-    `Settings.chat_stream_max_workers` so it's tunable without a code change.
+    Separate from asyncio's shared default executor (used by this module's
+    non-streaming path, `/api/v1/query`, and everything else): a
+    `pipeline.answer()` already executing can't be interrupted mid-LLM-call,
+    so a disconnected client's run keeps occupying a thread until it
+    finishes or `request_budget_seconds` gives up on it. Isolating the pool
+    means repeated aborts can only ever exhaust this endpoint's capacity,
+    never starve DB writes, ingestion, or other request handling. Sized via
+    `Settings.chat_stream_max_workers`.
     """
     return ThreadPoolExecutor(
         max_workers=get_settings().chat_stream_max_workers,
@@ -190,13 +174,9 @@ def _reap_abandoned_run(cid: str, future: "asyncio.Future[PipelineResult]") -> N
     """Done-callback for a pipeline run whose stream was torn down before it
     finished (client disconnected mid-stream).
 
-    The run itself cannot be interrupted once its LLM call is in flight (see
-    `_get_stream_executor`), so it keeps going until it naturally finishes or
-    `request_budget_seconds` gives up on it. This callback exists so that:
-    (1) the eventual result/exception is *retrieved*, so asyncio doesn't log
-    an unrelated "Future exception was never retrieved" warning for it, and
-    (2) the abandoned run is accounted for in the logs instead of silently
-    vanishing with nobody left to consume it.
+    Retrieves the eventual result/exception so asyncio doesn't log an
+    unrelated "Future exception was never retrieved" warning, and logs the
+    abandoned run instead of letting it vanish silently.
     """
     if future.cancelled():
         logger.info(
@@ -258,12 +238,10 @@ async def chat_completions(body: ChatCompletionRequest):
         # Submitted directly against the executor (rather than via
         # `loop.run_in_executor`) so `raw_future` -- the real
         # `concurrent.futures.Future` -- is still in hand in `finally`.
-        # `raw_future.cancel()` gives an accurate signal (True only if the
-        # job hadn't started running yet); `task.cancel()` on the
-        # asyncio-wrapped future does not -- it reports success
-        # unconditionally regardless of whether the underlying thread is
-        # already executing, which would make the disconnect log message
-        # below lie about whether the run actually stopped.
+        # `raw_future.cancel()` gives an accurate signal (True only if the job
+        # hadn't started yet); `task.cancel()` on the wrapped future does
+        # not -- it reports success unconditionally, which would make the
+        # disconnect log message below lie about whether the run stopped.
         raw_future = _get_stream_executor().submit(pipeline.answer, question, history, on_status)
         task = asyncio.wrap_future(raw_future, loop=loop)
         get_status: asyncio.Task | None = None
@@ -309,33 +287,22 @@ async def chat_completions(body: ChatCompletionRequest):
             yield "data: [DONE]\n\n"
             return
         finally:
-            # Runs on every exit path, including a client disconnect: Starlette
-            # tears this generator down via GeneratorExit (aclose()) or a
-            # CancelledError thrown at the `await asyncio.wait(...)` point
-            # above -- neither is caught by the except clauses above (both
-            # are BaseException, not Exception), so this is the only place
-            # that reliably sees "the stream is gone but the pipeline run may
-            # still be going." On the normal-completion and handled-exception
-            # paths above, `task` is already done by construction (we only
-            # ever reach `task.result()` after it's in asyncio.wait's `done`
-            # set), so the block below is a no-op there.
+            # Runs on every exit path, including a client disconnect:
+            # Starlette tears this generator down via GeneratorExit or a
+            # CancelledError at the `await asyncio.wait(...)` point above --
+            # neither is caught by the except clauses (both are
+            # BaseException, not Exception), so this is the only place that
+            # reliably sees "the stream is gone but the run may still be
+            # going." On the normal/handled-exception paths, `task` is
+            # already done here, so this block is a no-op there.
             if get_status is not None and not get_status.done():
                 get_status.cancel()
             if not task.done():
-                # raw_future.cancel() is the real signal: True only if the
-                # executor hadn't started the job on a worker thread yet (in
-                # which case it now never will), False if it's already
-                # executing pipeline.answer() and therefore cannot be
-                # interrupted mid-LLM-call. Either way, `task` -- chained to
-                # `raw_future` by asyncio.wrap_future -- will still reach
-                # `done()` on its own: immediately if truly cancelled, or
-                # later with the real result/exception if not, which is why
-                # the done-callback is attached unconditionally rather than
-                # only in the "didn't cancel" branch. This is what accounts
-                # for the run instead of leaking it silently; the pipeline's
-                # own request_budget_seconds wall-clock cap bounds
-                # how much longer an in-flight run can occupy its thread with
-                # nobody left to consume the result.
+                # True only if the executor hadn't started the job yet;
+                # False if it's already executing and can't be interrupted.
+                # Either way `task` still reaches `done()` on its own, which
+                # is why the done-callback is attached unconditionally --
+                # that's what accounts for the run instead of leaking it.
                 really_cancelled = raw_future.cancel()
                 logger.info(
                     "chat completion %s: client disconnected mid-stream; pipeline run %s",

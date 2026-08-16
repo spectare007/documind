@@ -12,8 +12,16 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
-    from app.db.session import init_db
+    from app.db.session import get_session, init_db
     init_db()
+    from app.db.repository import JobRepository
+    with get_session() as s:
+        reconciled = JobRepository(s).reconcile_interrupted()
+    if reconciled:
+        logger.warning(
+            "startup reconciliation: marked %d interrupted ingest job(s) failed: %s",
+            len(reconciled), reconciled,
+        )
     try:
         from app.observability.prompts import get_prompt_manager
         manager = get_prompt_manager()

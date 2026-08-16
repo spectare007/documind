@@ -45,6 +45,7 @@ class IngestJob(Base):
     __tablename__ = "ingest_jobs"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     status: Mapped[str] = mapped_column(String(16), default="running")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     total_documents: Mapped[int] = mapped_column(Integer, default=0)
     completed_documents: Mapped[int] = mapped_column(Integer, default=0)
     failed_documents: Mapped[int] = mapped_column(Integer, default=0)
