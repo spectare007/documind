@@ -35,7 +35,7 @@ graph TB
     Ingestion -->|Docling parse, then embed| Ollama
     Pipelines --> Postgres
     Ingestion --> Postgres
-    Backend -.->|OTLP spans:\nHTTP, crew, agent, tool,\nretriever, LLM| Phoenix
+    Backend -.->|OTLP spans:\nHTTP, crew, agent,\nretriever, LLM| Phoenix
     Backend -.->|sync + pull\nYAML prompts| Phoenix
     Health -.-> Postgres
     Health -.-> Ollama
@@ -86,7 +86,24 @@ flowchart LR
 
 ## 3. Agentic pipeline (corrective RAG)
 
-`app.pipelines.agentic.AgenticPipeline` owns this state machine; `app.agents.stages.CrewStages` owns turning each state into either a CrewAI crew kickoff (a single agent, single task, run to completion) or, for one stage, a direct LLM call, and parsing its output. Five CrewAI agent roles: Router, Query Rewriter, Researcher, Answer Synthesizer, Groundedness Checker. The sixth stage, Relevance Grading, is *not* a CrewAI agent: `CrewStages.grade()` calls `self.llm.call(...)` directly, with no `Agent`, `Task`, or `Crew` involved, because wrapping the per-chunk yes/no verdict in a CrewAI `Agent` was measured to invert the model's judgment: the agent wrapper injects its own system message, and that system message alone flipped the small model to answering "no" regardless of content, confirmed with a control question that has an obvious answer ("Is grass green?", answered "no" with the system message present and "yes" with it removed). Removing the wrapper for this one stage and calling the model directly restored genuine per-chunk discrimination.
+`app.pipelines.agentic.AgenticPipeline` owns this state machine; `app.agents.stages.CrewStages` owns turning each state into a CrewAI crew kickoff (a single agent, single task, run to completion), a direct LLM call, or plain code, and parsing its output.
+
+**Which stages are agents, and which are not.** Six stages, four of them CrewAI agents:
+
+| Stage | Implementation | Why |
+|---|---|---|
+| Router | CrewAI `Agent`/`Task`/`Crew` | decides retrieve vs. reply directly |
+| Query Rewriter | CrewAI `Agent`/`Task`/`Crew` | decides what to search for |
+| Retrieval (`research()`) | plain Python, no LLM call | no decision left to make, see below |
+| Relevance grading (`grade()`) | direct `self.llm.call(...)`, no `Agent` | measurably worse inside an agent wrapper, see below |
+| Answer Synthesizer | CrewAI `Agent`/`Task`/`Crew` | decides what the answer is |
+| Groundedness Checker | CrewAI `Agent`/`Task`/`Crew` | decides whether the answer is supported |
+
+`direct_answer()`, the no-retrieval branch off the Router, is also a CrewAI agent.
+
+**Why grading is not an agent.** `CrewStages.grade()` calls `self.llm.call(...)` directly, with no `Agent`, `Task`, or `Crew` involved, because wrapping the per-chunk yes/no verdict in a CrewAI `Agent` was measured to invert the model's judgment: the agent wrapper injects its own system message, and that system message alone flipped the small model to answering "no" regardless of content, confirmed with a control question that has an obvious answer ("Is grass green?", answered "no" with the system message present and "yes" with it removed). Removing the wrapper for this one stage and calling the model directly restored genuine per-chunk discrimination.
+
+**Why retrieval is not an agent.** It used to be one: a "Researcher" role with a `document_search` CrewAI tool wrapped around the hybrid retriever. That agent added no decision. By the time it ran, the Rewriter had already chosen the search queries and every one of them was going to be searched, so the only thing left to do was call the retriever once per query. The agent's own returned text was discarded outright; the chunks were read back out of a buffer the tool wrote into. What the agent did add was one LLM completion per retrieval attempt, on a path whose measured median latency was about two minutes, plus its own failure modes: a small model that answers from memory without calling its tool at all, which needed a direct-retrieval fallback, which in turn needed a tool-usage-count guard to stop it retrieving everything twice. `research()` is now a plain loop over `self.retriever.retrieve()`, keeping the same `(doc_id, text)` dedup, the same signature and the same return type, and `app/agents/tools.py` is deleted. One golden-set question re-run afterwards returned the same correct answer in 59s against a recorded 121s; that is one data point, not a re-measured distribution.
 
 ```mermaid
 stateDiagram-v2
@@ -97,9 +114,9 @@ stateDiagram-v2
     Route --> Rewrite: classified "rag"
 
     state "Retrieval loop (max_retrieval_attempts = 2)" as RetrievalLoop {
-        Rewrite --> Research: standalone search queries
-        Research --> Grade: chunks found
-        Research --> NoMatch: no chunks found
+        Rewrite --> Retrieve: standalone search queries
+        Retrieve --> Grade: chunks found
+        Retrieve --> NoMatch: no chunks found
         Grade --> HaveContext: at least one chunk\ngraded relevant
         Grade --> NoneRelevant: every graded chunk\nrejected ("no")
     }
@@ -131,16 +148,16 @@ stateDiagram-v2
 **The three independent bounds** (from `AgenticPipeline`'s module docstring, all load-bearing, none of them redundant with the others):
 
 1. **Attempt bounds.** `max_retrieval_attempts` and `max_generation_attempts` (both default 2): one attempt plus at most one correction, each. This bounds *how many times* a loop can run, not how long it takes.
-2. **Wall-clock request budget** (`request_budget_seconds`, default 300s). `llm_timeout_seconds` only bounds a single completion; one request can make roughly a dozen of them in the worst case (router, rewrite/retrieve retry, up to `retrieval_top_k` per-chunk grader calls, synthesis/verification retry), so a degraded Ollama could otherwise hold a worker for a very long time. Checked at stage boundaries only: it stops the pipeline from *starting more work* and returns the best result already in hand. It deliberately never skips the first attempt of either loop (a response that tried nothing is worse than a slow one), and it cannot interrupt a completion already in flight, that is `llm_timeout_seconds`'s job.
+2. **Wall-clock request budget** (`request_budget_seconds`, default 300s). `llm_timeout_seconds` only bounds a single completion; one request can make roughly a dozen of them in the worst case (router, rewrite retry, up to `retrieval_top_k` per-chunk grader calls, synthesis/verification retry), so a degraded Ollama could otherwise hold a worker for a very long time. Checked at stage boundaries only: it stops the pipeline from *starting more work* and returns the best result already in hand. It deliberately never skips the first attempt of either loop (a response that tried nothing is worse than a slow one), and it cannot interrupt a completion already in flight, that is `llm_timeout_seconds`'s job.
 3. **Exception containment.** Any unexpected stage failure returns a friendly `PipelineResult` (`grounded=None`) instead of propagating as a bare 500. The one deliberate exception: `LLM_UNAVAILABLE_ERRORS` (an unreachable or timed-out Ollama) is re-raised so `app.api.query` and the OpenAI-compatible endpoint can turn it into a structured `503`, since upstream unavailability is an expected condition with its own designed response, not an unexpected bug. The groundedness checker additionally fails open on its own crash, so a flaky verifier can never discard an answer already produced; that path reports `grounded=null` (no check ran), never `true`, so an unchecked answer stays distinguishable from a checked one.
 
 **What `grounded` is worth.** It is a weak signal and the API documents it as one (`doc/api.md`). The checker is a single yes/no completion from the same 3B model over the whole retrieved context, and it verifies textual presence rather than semantic support: it has passed an answer that attributed a real number to the wrong label, because those digits appeared somewhere in the context. `parse_verdict` is also fail-open, so anything that does not start with "no" counts as `true`. `true` therefore means "a small local model did not object", which is telemetry, not a hallucination guarantee, and it is deliberately not presented as one anywhere user-facing.
 
 **Relevance grading is one binary yes/no call per chunk**, not a single call returning a JSON array of relevant indices, and this was a mid-implementation correction, not the original plan: an earlier version asked the grader for a single JSON array of relevant chunk indices across all chunks at once, but the deployed 3B model returned an empty array for every input, relevant or not, once CrewAI's own task boilerplate was appended, which made the pipeline refuse to answer even when the corpus had the answer. It is bounded to the top `retrieval_top_k` chunks by score, so a broad retrieval cannot turn into an unbounded number of grading calls. Every parser in `app.agents.stages` (route, chunk indices, queries, groundedness verdict) fails toward *keeping more*, not less, on an unreadable model reply: an off-format grader keeps the chunk, an off-format router retrieves, an off-format hallucination check assumes grounded. Only an explicit, well-formed rejection (`no`, or an explicit empty array) is trusted as a real negative judgment.
 
-**Simple mode** (`DOCUMIND_PIPELINE_MODE=simple`) is a separate, much shorter pipeline (`app.pipelines.simple.SimplePipeline`): retrieve once, synthesize once, no grading, no rewriting, no correction loop. It is the RAGAs "naive RAG" baseline the agentic pipeline is compared against, and it is also **the shipped default**, because the comparison went against the agentic pipeline on the thing users notice first: agentic mode answered 15 of 23 answerable golden-set questions at a median of 125s, simple mode answered every question it was tried against in 25 to 82s from the same index. Agentic mode is unchanged and fully supported, selected per deployment (`DOCUMIND_PIPELINE_MODE=agentic`) or per request (`"mode": "agentic"` on `POST /api/v1/query`).
+**Simple mode** (`DOCUMIND_PIPELINE_MODE=simple`) is a separate, much shorter pipeline (`app.pipelines.simple.SimplePipeline`): retrieve once, synthesize once, no grading, no rewriting, no correction loop. It is the RAGAs "naive RAG" baseline the agentic pipeline is compared against, and it is also **the shipped default**, because the comparison went against the agentic pipeline on the thing users notice first: scored against the golden references on a four-way correctness rubric, agentic mode got 11 of 23 answerable golden-set questions correct (8 refused, 3 partial, 1 fabricated) at a median of 125s, while simple mode answered every question it was tried against in 25 to 82s from the same index. Simple mode has not been scored on that rubric across all 25 questions, only spot-checked on 9, so the two modes are not yet rubric-comparable on correctness and the default rests on latency plus that spot check. Agentic mode is unchanged and fully supported, selected per deployment (`DOCUMIND_PIPELINE_MODE=agentic`) or per request (`"mode": "agentic"` on `POST /api/v1/query`).
 
-**Per-request `top_k`.** `POST /api/v1/query` accepts an optional `top_k` (1 to 50) that overrides `retrieval_top_k` for that call in both modes. In agentic mode it is threaded into both of the researcher's retrieval paths (the `document_search` tool and the direct fallback, so the chunk count does not depend on whether the agent remembered to call its tool) and into the grader's cap, so a larger value cannot leave the extra chunks retrieved and then silently ungraded.
+**Per-request `top_k`.** `POST /api/v1/query` accepts an optional `top_k` (1 to 50) that overrides `retrieval_top_k` for that call in both modes. In agentic mode it is threaded into the retrieval stage and into the grader's cap, so a larger value cannot leave the extra chunks retrieved and then silently ungraded.
 
 ---
 

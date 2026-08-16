@@ -71,7 +71,7 @@ One FastAPI service, one Postgres instance (vectors + full-text + ledger), one O
 | Docling | `backend/app/ingestion/pipeline.py`, `preprocessor.py`: `DocumentConverter`, `HybridChunker` |
 | PGVector | `postgres` service (`pgvector/pgvector:pg16`); `backend/app/retrieval/vector_store.py` |
 | LlamaIndex | `backend/app/retrieval/retriever.py`, `vector_store.py`: hybrid retriever |
-| CrewAI | `backend/app/agents/stages.py`, `tools.py`, `llm.py`: five CrewAI agent roles plus one direct-call grading stage |
+| CrewAI | `backend/app/agents/stages.py`, `llm.py`: four CrewAI agent roles plus two deterministic stages (retrieval, grading) |
 | Ollama | `ollama` service in `docker-compose.yml`; `qwen2.5:3b`, `nomic-embed-text`, `qwen2.5:7b` |
 | Phoenix | `backend/app/observability/tracing.py`, `prompts.py`; `phoenix` service |
 | RAGAs | `scripts/evaluate.py`, `evaluation/golden_set.json` |
@@ -123,13 +123,13 @@ At ingest time, `app/ingestion/contextualizer.py` prepends a structural header b
 
 ## The agentic corrective-RAG crew
 
-Five CrewAI agent roles, one crew (single agent, single task) per stage, orchestrated by plain Python control flow, not CrewAI's own delegation, plus one stage that bypasses CrewAI entirely:
+Six stages. Four are CrewAI agents, one crew (single agent, single task) each, orchestrated by plain Python control flow rather than CrewAI's own delegation. Two are deliberately not agents:
 
 | Stage | Kind |
 |---|---|
 | Router | CrewAI agent, LLM call |
 | Query Rewriter | CrewAI agent, LLM call |
-| Researcher | CrewAI agent, **tool execution** (`document_search` → LlamaIndex hybrid retriever) |
+| Retrieval | **plain code, no LLM call** -- one `retriever.retrieve()` per rewritten query, deduplicated. Was a "Researcher" CrewAI agent with a `document_search` tool; removed because the Rewriter had already chosen the queries, so the agent made no decision, its returned text was discarded, and it cost one completion per attempt on a two-minute path |
 | Relevance Grader | **direct LLM call, no CrewAI agent** -- one binary call per chunk (wrapping this in a CrewAI `Agent` was measured to invert the model's judgment) |
 | Answer Synthesizer | CrewAI agent, LLM call |
 | Groundedness Checker | CrewAI agent, LLM call |
@@ -164,14 +164,14 @@ Plus a wall-clock request budget (300s) checked at stage boundaries, independent
 Every request produces one trace:
 
 ```
-CHAIN  crew kickoff (per stage)
-  AGENT  role (Router / Rewriter / Researcher / Synthesizer / Checker)
-    TOOL   document_search
-      LlamaIndex retriever / embedding spans
+CHAIN  crew kickoff (per agent stage)
+  AGENT  role (Router / Rewriter / Synthesizer / Checker)
     LLM    ChatCompletion (prompt, completion, model, token counts)
+LlamaIndex retriever / embedding spans   (retrieval stage, no agent above it)
+LLM    ChatCompletion                    (one per graded chunk, no agent above it)
 ```
 
-The Relevance Grader is a direct LLM call, not a CrewAI agent, so it produces an `LLM` span but no `AGENT` span -- there is no "Grader" agent span in any trace.
+Two of the six stages produce no `AGENT` span, by design. The Relevance Grader is a direct LLM call, so it shows up as an `LLM` span only. Retrieval is plain code, so it shows up as retriever and embedding spans only. There is no "Grader" or "Researcher" agent span in any trace, and no `document_search` `TOOL` span.
 
 - One real agentic HTTP query produced **7 LLM spans**, **~1847 prompt + 240 completion tokens**.
 - A `correlation.id` on every span ties it back to the request's log lines (`X-Correlation-ID`).
@@ -217,11 +217,13 @@ Runtime prompt used by the crew
 
 **Headline result (full 25-question sweep against the real corpus, `doc/evaluation-report.md`):**
 
-- Agentic mode answered 15 of 23 answerable questions and correctly refused both of the 2 unanswerable ones, with **zero fabricated answers** across all 25.
+- Scored against the golden references on a four-way rubric (correct / partial / refused / fabricated), agentic mode got **11 of 23** answerable questions correct: 8 refused, 3 partial, 1 fabricated. It correctly refused both of the 2 unanswerable ones.
+- This replaces an earlier "15 of 23 answered, zero fabrications" headline. That count treated any non-refusal as a success, so it scored a wrong answer the same as a right one; reading the answers, 4 of those 15 do not hold up and one of them is a fabrication. The zero-fabrications claim was wrong.
+- Scoring method, stated plainly: by inspection against the committed golden references, one reader, no automated judge, on the recorded 2026-08-16 run. Simple mode has never been scored on the same rubric across all 25 questions (only a 4-question cross-check exists), so **the two modes are not yet rubric-comparable on correctness**. Running simple mode through the same rubric is the next measurement.
 - The 8 refusals on answerable questions were all traced to the per-chunk relevance grader rejecting every retrieved chunk before synthesis ran, not to a retrieval failure (confirmed by re-running 4 of them in simple mode, which answered all 4 correctly from the same index).
-- Latency: min 60s, median 125s, mean 132s, max 258s over the 25 questions.
+- Latency: min 60s, median 125s, mean 132s, max 258s over the 25 questions. Recorded before the Researcher agent was removed; one re-run question came back in 59s against a recorded 121s, a single data point, not a re-measured distribution.
 - A fail-open grader fix (proceed to synthesis on the top-ranked chunks when the grader rejected all of them) was tried, found to fix those 8 refusals but fabricate an answer on an unanswerable question, and reverted.
-- **Consequence: simple mode ships as the default.** Agentic mode is fully supported and one setting (or one request field) away, but the pipeline that answers more questions in a third of the time is what a first-time user should meet first. Shipping the more impressive architecture as the default, when the measurement says it is the worse product, would be choosing the demo over the user.
+- **Consequence: simple mode ships as the default.** Agentic mode is fully supported and one setting (or one request field) away, but the pipeline that answers more questions in a third of the time is what a first-time user should meet first. Note the honest caveat: "answers more questions" for simple mode rests on 9 loosely-judged questions, not on the rubric. Shipping the more impressive architecture as the default, when the measurement says it is the worse product, would be choosing the demo over the user.
 
 ---
 
@@ -240,7 +242,7 @@ The most interesting failures this build actually surfaced:
 
 - **CPU-only latency.** Measured against the real corpus over 25 questions: simple mode 25 to 82s, agentic mode 60 to 258s (median 125s, mean 132s). This is the assessment's own constraint, not a config miss: the user explicitly chose agentic depth over speed, so the agentic pipeline is built in full and kept fully supported. What changed is only which one you get without asking.
 - **The judge is a small local model, not a frontier one.** `qwen2.5:7b` on CPU makes RAGAs scores directionally useful, not precise. Same judge scores both pipelines, so the comparison is more trustworthy than any single absolute score.
-- **The per-chunk grader is measurably over-selective.** Across the full 25-question sweep against the real corpus, the grader rejected every retrieved chunk on 8 of 23 answerable questions, driving agentic mode's recall well below simple mode's (`doc/evaluation-report.md`). A fail-open fallback around the grader was tried and fixed those refusals, but it also caused a fabricated answer on a genuinely unanswerable question, so it was reverted; the grader's recall gap remains open, with a larger judge model (`qwen2.5:7b`) identified as the next thing to try. Until it closes, simple mode is the default.
+- **The per-chunk grader is measurably over-selective, and the answers that do get through are not all right.** Across the full 25-question sweep against the real corpus, the grader rejected every retrieved chunk on 8 of 23 answerable questions, and of the 15 that did produce an answer, 3 are partial and 1 is a fabrication, leaving 11 of 23 correct (`doc/evaluation-report.md`). A fail-open fallback around the grader was tried and fixed those refusals, but it also caused a fabricated answer on a genuinely unanswerable question, so it was reverted; the grader's recall gap remains open, with a larger judge model (`qwen2.5:7b`) identified as the next thing to try. Until it closes, simple mode is the default.
 - **The groundedness check is a weak safety net, and is labelled as one.** It verifies that an answer's claims appear in the context textually, not that the context supports them, so it once passed an answer that attached a real number to the wrong label. The `grounded` field is documented as a heuristic signal with three values (`true` = did not object, `false` = objected, `null` = no check ran), never as a hallucination guarantee. Verifying claim support rather than string presence is the fix, and it is larger than this assessment had room for.
 
 ---

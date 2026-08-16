@@ -23,7 +23,7 @@ Or skip rendering entirely and present `deck.md` directly: any Marp-aware editor
 No screenshots are included in this submission; none were fabricated. The deck describes, in text, what each would show instead of embedding a broken image link. If you want to add them, drop these two files in `doc/presentation/img/` with these exact names and the deck's captions will still apply:
 
 - **`img/chat.png`** (an OpenWebUI chat, `http://localhost:3000`, showing a question answered by the `agentic-rag` model, with the collapsible think-block **expanded** so the stage-status lines are visible: `Routing query…`, `Searching documents…`, `Grading context…`, etc., and the final cited answer visible below it).
-- **`img/trace.png`** (a Phoenix trace tree, `http://localhost:6006`, for one agentic query: the `CHAIN` crew-kickoff spans, the `AGENT` span per CrewAI role, the `TOOL` `document_search` span, the LlamaIndex retriever/embedding spans underneath it, and at least one `LLM` `ChatCompletion` span with its prompt, completion, and token counts visible).
+- **`img/trace.png`** (a Phoenix trace tree, `http://localhost:6006`, for one agentic query: the `CHAIN` crew-kickoff spans, the `AGENT` span per CrewAI role, the LlamaIndex retriever/embedding spans from the retrieval stage, and at least one `LLM` `ChatCompletion` span with its prompt, completion, and token counts visible).
 
 ## Where the numbers come from
 

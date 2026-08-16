@@ -1,40 +1,60 @@
 # DocuMind RAG Evaluation Report
 
-Last updated: 2026-08-16 · Corpus: 6-document real corpus (Form No. 42 receipt and filed form, two June 2026 invoice files, a French timesheet, a June 2026 payslip)
+Last updated: 2026-08-17 · Corpus: 6-document real corpus (Form No. 42 receipt and filed form, two June 2026 invoice files, a French timesheet, a June 2026 payslip)
 
-This report has two parts. Part 1 is the current, primary result: all 25 golden-set questions run through `agentic` mode against the real corpus on the current build. Part 2 is an earlier RAGAs metric run over a 5-question subset, kept for its metric detail but superseded as a measure of agentic mode's current behavior (see the warning at the top of that section).
+This report has two parts. Part 1 is the current, primary result: all 25 golden-set questions run through `agentic` mode against the real corpus, scored for correctness against their golden references. Part 2 is an earlier RAGAs metric run over a 5-question subset, kept for its metric detail but superseded as a measure of agentic mode's current behavior (see the warning at the top of that section).
+
+Note on values: the corpus is a set of the author's real personal documents, so the committed golden set uses placeholders (`<REDACTED-...>`) in place of the actual figures, dates and identifiers. This report follows the same rule. Answers are characterised, never quoted with their values.
 
 ---
 
-## Part 1: Full 25-question agentic sweep (current, primary result)
+## Part 1: Full 25-question agentic sweep, scored for correctness (current, primary result)
 
-**Method**: all 25 questions in `evaluation/golden_set.json` were sent to `POST /api/v1/query` with `mode=agentic` against the real corpus, on the current build (after a fail-open fallback around the grader, tried and reverted after it caused a fabrication, was removed, i.e. the grader behaves as shipped). Each row recorded the question, category, answer, number of retrieved chunks, citations, a groundedness flag, latency, and a trace ID.
+**Method**: all 25 questions in `evaluation/golden_set.json` were sent to `POST /api/v1/query` with `mode=agentic` against the real corpus, in a single recorded run on 2026-08-16, on the build of that date (after a fail-open fallback around the grader, tried and reverted after it caused a fabrication, was removed, i.e. the grader behaves as shipped). Each row recorded the question, category, answer, number of retrieved chunks, citations, a groundedness flag, latency, and a trace ID. Every answer was then scored against its golden reference on the rubric below.
+
+### Scoring rubric and how it was applied
+
+An earlier version of this section reported "15 of 23 answered" as the headline. That number was measuring the wrong thing: it counted any response that was not the standard zero-chunk refusal, so a right answer and a wrong answer scored identically. Every answer has since been read against its golden reference and scored on a four-way rubric:
+
+| Verdict | Meaning |
+|---|---|
+| **correct** | States the fact the reference states, from the right document. |
+| **partial** | Right document and topic, but incomplete, garbled, hedged into uselessness, or carrying a visible prompt-leak artifact in the answer text. |
+| **refused** | Returned the standard "couldn't find anything relevant" message with zero retrieved chunks. Correct behaviour on an unanswerable question, a recall failure on an answerable one. |
+| **fabricated** | Asserts something the reference contradicts, or invents a value. |
+
+**Method, stated plainly**: scored by inspection, one reader comparing each recorded answer against the committed golden reference. No automated judge and no second rater were involved, so the boundary between `correct` and `partial` in particular carries the reader's judgment. Scored on the recorded 2026-08-16 sweep, not re-run since. The verdicts below are reproducible from the recorded run in the sense that the answers are fixed text; they are not reproducible in the sense that a different reader might move a borderline row.
 
 ### Headline
 
-- Of the 23 answerable questions, 15 were answered and 8 were refused with the standard "couldn't find anything relevant" message. All 8 refusals returned zero retrieved chunks, i.e. the grading stage rejected every candidate chunk before synthesis ever ran.
-- Of the 2 unanswerable questions, both were correctly declined, with no chunks retrieved and no fabricated content.
-- Across all 25 questions, there were zero fabricated answers: every question that produced an answer had chunks and citations behind it, and both genuinely unanswerable questions were correctly refused rather than guessed at.
+- **Of the 23 answerable questions, 11 were correct.** 3 were partial, 8 were refused, and 1 was fabricated.
+- Of the 2 unanswerable questions, both were correctly refused, with no chunks retrieved and no invented content. That result stands unchanged.
+- The rubric changes the story. Under the old "answered vs refused" count, 15 of 23 looked like a pass and the report claimed zero fabrications. Reading the answers, 4 of those 15 do not hold up: 3 are partial and 1 is a fabrication. **The claim of zero fabrications across the sweep was wrong** and has been removed from this report and from `README.md`, `doc/architecture.md` and `doc/presentation/deck.md`. The corrected figure is 11 of 23 correct, i.e. under half the answerable set.
+- The single fabrication is question 9: the model asserted that the filed form does not specify a validity period, where the reference says it does and names one. That is an assertion of absence contradicted by the reference, which the rubric scores as fabricated even though no value was invented.
+- Two of the three partials are quality failures visible in the answer text itself, not disagreements about the fact: question 6 emitted the synthesizer's own expected-output instruction as the first line of the answer before stating the (correct) figure, and question 11 produced four repetitive, mutually inconsistent sentences about its single retrieved chunk and concluded it could not determine the comparison. Question 7 answered with the form's generic statutory title instead of the specific purpose the reference gives.
 
-### Results by category
+### Results by category (rubric)
 
-| Category | Answered | Total | Refused |
-|---|---|---|---|
-| single-doc-numeric | 5 | 6 | 1 |
-| single-doc-factual | 9 | 15 | 6 |
-| multi-doc | 1 | 2 | 1 |
-| unanswerable (correctly declined) | 2 | 2 | 0 |
+| Category | Correct | Partial | Refused | Fabricated | Total |
+|---|---|---|---|---|---|
+| single-doc-numeric | 4 | 1 | 1 | 0 | 6 |
+| single-doc-factual | 7 | 1 | 6 | 1 | 15 |
+| multi-doc | 0 | 1 | 1 | 0 | 2 |
+| unanswerable (refusal is the correct verdict) | n/a | 0 | 2 | 0 | 2 |
+| **answerable total** | **11** | **3** | **8** | **1** | **23** |
 
-### Results by source document
+Neither multi-document question was answered correctly. That is 0 for 2 on the category the corrective-RAG design is most meant to help with, on a corpus that does contain both halves of both comparisons.
 
-| Document | Answered | Total |
-|---|---|---|
-| Timesheet (French timesheet template) | 4 | 4 |
-| Form No. 42 (acknowledgement receipt + filed form) | 8 | 11 |
-| Invoice (June 2026) | 2 | 4 |
-| Payslip (June 2026) | 1 | 4 |
+### Results by source document (rubric)
 
-The refusals are concentrated in the payslip (3 of 4 questions refused) and invoice (2 of 4 refused) documents; the timesheet had zero refusals and Form No. 42 had the fewest refusals relative to its question count.
+| Document | Correct | Partial | Refused | Fabricated | Total |
+|---|---|---|---|---|---|
+| Timesheet (French timesheet template) | 4 | 0 | 0 | 0 | 4 |
+| Form No. 42 (receipt + filed form + cross-document) | 4 | 3 | 3 | 1 | 11 |
+| Invoice (June 2026) | 2 | 0 | 2 | 0 | 4 |
+| Payslip (June 2026) | 1 | 0 | 3 | 0 | 4 |
+
+The timesheet is the only document the pipeline handles cleanly, 4 for 4. Refusals concentrate in the payslip (3 of 4) and the invoice (2 of 4). Form No. 42 has the most questions and the widest spread of failure modes: it accounts for all 3 partials and the only fabrication, so its earlier "8 of 11 answered" reading was the most misleading row in the old table.
 
 ### Latency distribution (25 questions, agentic mode)
 
@@ -46,41 +66,45 @@ The refusals are concentrated in the payslip (3 of 4 questions refused) and invo
 | max | 257.6 s |
 | total (sum across all 25) | 3308.1 s (~55 min) |
 
-### Per-question results
+These latencies were recorded before the Researcher stage stopped being a CrewAI agent (see `doc/architecture.md`). That change removes one LLM completion per retrieval attempt without changing what is retrieved. One question from this set was re-run afterwards against the same corpus and model: question 1, recorded at 120.6 s here, returned the same correct answer in **59.2 s**. That is a single data point, one question, one run, not a re-measured distribution, and the table above has deliberately not been adjusted for it. A full re-sweep is needed before any median is restated.
 
-Two rows (marked with a note) counted as "answered" only in the narrow sense that the pipeline retrieved a chunk and did not emit the standard zero-context refusal message; the answer text itself did not actually state the fact asked for. They are listed as answered here to keep this table's answered/refused split consistent with the zero-chunk criterion used everywhere else in this report, with the caveat spelled out in the note.
+### Per-question results (rubric)
+
+Answers are described, never quoted, because the corpus is a set of real personal documents. Where a row failed, the note says how it failed without restating the value involved.
 
 | # | Category | Question (short) | Verdict | Chunks | Latency (s) | Note |
 |---|---|---|---|---|---|---|
-| 1 | single-doc-factual | Form 42: what is it used for | Answered | 4 | 120.6 | |
-| 2 | single-doc-numeric | Form 42: e-filing acknowledgement number | Answered | 1 | 60.2 | |
+| 1 | single-doc-factual | Form 42: what is it used for | Correct | 4 | 120.6 | |
+| 2 | single-doc-numeric | Form 42: e-filing acknowledgement number | Correct | 1 | 60.2 | |
 | 3 | single-doc-factual | Form 42: e-filing date | Refused | 0 | 173.3 | |
-| 4 | single-doc-factual | Form 42: tax year | Answered | 1 | 106.3 | |
-| 5 | single-doc-factual | Form 42: filing type (original/revised) | Answered | 1 | 85.7 | |
-| 6 | single-doc-numeric | Form 42: attachment count | Answered | 1 | 140.4 | answer text included a leaked prompt fragment ahead of the actual figure |
-| 7 | single-doc-factual | Form 42: purpose of the TRC | Answered | 1 | 66.5 | |
+| 4 | single-doc-factual | Form 42: tax year | Correct | 1 | 106.3 | |
+| 5 | single-doc-factual | Form 42: filing type (original/revised) | Correct | 1 | 85.7 | |
+| 6 | single-doc-numeric | Form 42: attachment count | **Partial** | 1 | 140.4 | the figure is right, but the answer opens by echoing the synthesizer's own expected-output instruction as if it were content: a visible prompt leak, so not scorable as correct |
+| 7 | single-doc-factual | Form 42: purpose of the TRC | **Partial** | 1 | 66.5 | answered with the form's generic statutory title instead of the specific purpose the reference states; right document, wrong level of detail |
 | 8 | single-doc-factual | Form 42: applicant nationality | Refused | 0 | 162.9 | |
-| 9 | single-doc-factual | Form 42: TRC applicability period | Answered | 1 | 133.5 | model stated the form does not specify a period, which does not match the reference; not a zero-context refusal |
+| 9 | single-doc-factual | Form 42: TRC applicability period | **Fabricated** | 1 | 133.5 | asserted the form does not specify a validity period; the reference says it does and names one |
 | 10 | single-doc-factual | Form 42: verification capacity (individual/company) | Refused | 0 | 105.1 | |
-| 11 | multi-doc | Form 42: receipt vs. filed form, same ack. number? | Answered | 1 | 182.5 | model concluded it could not determine this from the single chunk retrieved; not a zero-context refusal |
+| 11 | multi-doc | Form 42: receipt vs. filed form, same ack. number? | **Partial** | 1 | 182.5 | four repetitive sentences about one retrieved chunk, contradicting each other about what that chunk contains, ending in "cannot be determined"; the reference says the two documents do match. Scored partial rather than fabricated because it makes no positive false claim about the documents' contents, but it delivers no usable answer |
 | 12 | single-doc-numeric | June 2026 invoice: invoice number | Refused | 0 | 86.2 | |
-| 13 | single-doc-numeric | June 2026 invoice: total amount | Answered | 2 | 75.7 | |
-| 14 | single-doc-factual | June 2026 invoice: line item billed | Answered | 2 | 134.4 | |
+| 13 | single-doc-numeric | June 2026 invoice: total amount | Correct | 2 | 75.7 | |
+| 14 | single-doc-factual | June 2026 invoice: line item billed | Correct | 2 | 134.4 | |
 | 15 | multi-doc | Compare the two June 2026 invoice files | Refused | 0 | 125.1 | |
-| 16 | single-doc-numeric | Timesheet: total hours | Answered | 1 | 174.4 | |
-| 17 | single-doc-numeric | Timesheet: timesheet number | Answered | 1 | 115.3 | |
-| 18 | single-doc-factual | Timesheet: week covered | Answered | 1 | 108.1 | |
-| 19 | single-doc-factual | Timesheet: submitted/approved dates | Answered | 1 | 257.6 | |
+| 16 | single-doc-numeric | Timesheet: total hours | Correct | 1 | 174.4 | |
+| 17 | single-doc-numeric | Timesheet: timesheet number | Correct | 1 | 115.3 | the groundedness checker flagged this one as ungrounded even though it matches the reference; a false positive on the checker's side, not an answer defect |
+| 18 | single-doc-factual | Timesheet: week covered | Correct | 1 | 108.1 | |
+| 19 | single-doc-factual | Timesheet: submitted/approved dates | Correct | 1 | 257.6 | |
 | 20 | single-doc-factual | Payslip: designation/job title | Refused | 0 | 162.9 | |
 | 21 | single-doc-factual | Payslip: payment mode | Refused | 0 | 158.0 | |
 | 22 | single-doc-factual | Payslip: pay cycle date range | Refused | 0 | 190.2 | |
-| 23 | single-doc-factual | Payslip: date joined | Answered | 1 | 108.6 | |
-| 24 | unanswerable | Company stock price (correctly declined) | Refused | 0 | 70.9 | |
-| 25 | unanswerable | Annual bonus amount (correctly declined) | Refused | 0 | 203.7 | |
+| 23 | single-doc-factual | Payslip: date joined | Correct | 1 | 108.6 | |
+| 24 | unanswerable | Company stock price | Refused (correct) | 0 | 70.9 | |
+| 25 | unanswerable | Annual bonus amount | Refused (correct) | 0 | 203.7 | |
+
+**A note on the groundedness flag.** It is not a correctness signal and should not be read as one. Of the three answers the checker marked ungrounded (6, 11, 17), one is a correct answer (17), one is a correct figure behind a prompt leak (6), and one is the garbled comparison (11). Meanwhile the one fabrication (9) was marked grounded. On this run the flag and the rubric agree on roughly half the rows they both cover, which is another reason the rubric had to be scored by reading the answers.
 
 ### Cross-mode diagnostic: isolating the cause of the refusals
 
-Four of the eight refused questions above were re-run in `simple` mode, which shares the same `HybridRetriever` and index as `agentic` mode but skips the corrective grading/synthesis-check loop. All four were answered correctly:
+Four of the eight refused questions above were re-run in `simple` mode, which shares the same `HybridRetriever` and index as `agentic` mode but skips the corrective grading/synthesis-check loop. All four were answered correctly. **This is a 4-question spot check, not a rubric run**: `simple` mode has never been scored on the four-way rubric across all 25 questions, so the two modes are not rubric-comparable and no "simple beats agentic on correctness, N to M" claim is available from this report.
 
 | Refused question (agentic) | Simple-mode result | Chunks | Latency (s) |
 |---|---|---|---|
@@ -91,13 +115,20 @@ Four of the eight refused questions above were re-run in `simple` mode, which sh
 
 Since both modes read from the same retrieval index, a question that `simple` mode answers correctly and `agentic` mode refuses cannot be a retrieval problem: the relevant chunks are present and rankable. The difference has to be downstream of retrieval, in the per-chunk relevance grading stage that only `agentic` mode runs. The `qwen2.5:3b` grader is known to be fragile on this exact classification task (see `doc/architecture.md` for the CrewAI-agent-wrapper failure mode that causes it). A previously tried fail-open fallback around the grader, which proceeded to synthesis on the top-ranked chunks whenever the grader rejected all of them, fixed these refusals but was reverted after it caused the synthesizer to fabricate a bonus figure by misattributing an unrelated payslip table row (see Part 2's judge-reliability note for related detail).
 
-### Analysis: precision vs. recall trade-off, and the concrete next step
+### Analysis: what the rubric says, and the concrete next steps
 
-Based on this sweep, `agentic` mode is currently precision-oriented: it would rather refuse than guess. Across all 25 questions it produced zero fabricated answers, and it correctly declined both genuinely unanswerable questions (2 of 2). Its cost is recall: 8 of 23 answerable questions were refused, all traced to the grading stage rejecting chunks it should have kept, and its per-question latency (60 to 258 seconds, mean 132 seconds) is far higher than `simple` mode's.
+`agentic` mode answers under half the answerable set correctly: 11 of 23. Its dominant failure mode is still refusal (8 of 23), all traced to the grading stage rejecting chunks it should have kept. But refusal is no longer the whole story. Of the 15 responses that were not refusals, 4 are defective: 3 partial and 1 fabrication. So the honest characterisation is not "precision-oriented, trades recall for zero fabrications". It is: high refusal rate, and among the answers it does produce, roughly one in four is wrong or degraded. It does get the two genuinely unanswerable questions right, 2 of 2, which is the one unqualified good result here.
 
-`simple` mode looks recall-oriented by comparison: the 5-question RAGAs run in Part 2 and the 4-question cross-mode diagnostic above are the only direct measurements available, and in both, `simple` mode answered every question it was given correctly, at latencies of 25 to 82 seconds in the diagnostic (versus 27 to 43 seconds mean/p95 in the RAGAs run). No full 25-question sweep of `simple` mode exists yet, so "answers essentially everything" is a claim scoped to the 5 RAGAs questions plus these 4 diagnostic questions (9 data points total, not 25), not an extrapolation to the full set.
+Per-question latency (60 to 258 seconds, mean 132 seconds) is far higher than `simple` mode's, so each of those defective answers also costs about two minutes.
 
-The concrete next step, not yet attempted: run the per-chunk grading stage on a larger model, `qwen2.5:7b`, which is already pulled locally and already used as the RAGAs judge, instead of the `qwen2.5:3b` used for the other agent roles. This exact 3B model's grading judgment is already known to be fragile to wrapper and prompt framing (see `doc/architecture.md`), which is the most likely explanation for the refusals here. The same 25 golden questions should be re-run in `agentic` mode with only the grading stage swapped to the larger model, so the comparison isolates that one change.
+`simple` mode has 9 measured data points (the 5-question RAGAs run in Part 2 and the 4-question cross-mode diagnostic above), and answered all of them correctly, at 25 to 82 seconds in the diagnostic. **It has not been scored on this rubric.** "Simple mode answers essentially everything" is therefore scoped to 9 questions judged loosely, against agentic mode's 25 questions judged strictly, and the two figures must not be put side by side as if they were the same measurement.
+
+Next steps, in priority order:
+
+1. **Run the same 25 questions through `simple` mode and score them on this identical four-way rubric.** This is the missing measurement. Until it exists, the choice of `simple` as the default rests on latency and on 9 loosely-judged questions, not on a like-for-like correctness comparison. Nothing else in this report should be read as ranking the modes on correctness.
+2. Run the per-chunk grading stage on a larger model, `qwen2.5:7b`, which is already pulled locally and already used as the RAGAs judge, instead of the `qwen2.5:3b` used for the other agent roles. This 3B model's grading judgment is already known to be fragile to wrapper and prompt framing (see `doc/architecture.md`), which is the most likely explanation for the 8 refusals. Re-run the 25 questions with only that stage swapped, so the comparison isolates one change.
+3. Fix the prompt leak behind question 6's partial. The synthesizer emitted its own expected-output instruction into the answer body, which is a formatting defect in the synthesis stage, independent of retrieval or grading quality.
+4. Replace inspection scoring with a second rater or a larger-model judge on the same rubric, so the correct/partial boundary stops resting on one reader.
 
 ---
 
