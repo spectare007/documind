@@ -52,14 +52,35 @@ def test_ingest_creates_job_and_reports_status(client):
 
 
 def test_upload_saves_pdf_and_lists_document(client, tmp_path):
+    # The real IngestionPipeline.ingest_file creates+commits the ledger row
+    # before returning the id, and the endpoint reads it back in a fresh
+    # session. Mimic that invariant here instead of just returning a bare
+    # id string, so the endpoint's strict re-fetch-and-validate path is
+    # exercised the way it will actually run in production.
+    from app.db.repository import DocumentRepository
+    from app.db.session import get_session
+
+    def _fake_ingest_file(path):
+        with get_session() as s:
+            doc = DocumentRepository(s).create(filename=path.name, sha="deadbeef")
+            return doc.id
+
     with patch("app.api.documents.IngestionPipeline") as pipe_cls:
-        pipe_cls.return_value.ingest_file = MagicMock(return_value="doc123")
+        pipe_cls.return_value.ingest_file = MagicMock(side_effect=_fake_ingest_file)
         r = client.post(
             "/api/v1/documents", headers=AUTH,
             files={"file": ("new.pdf", b"%PDF-1.7 fake", "application/pdf")},
         )
     assert r.status_code == 201
     assert (tmp_path / "new.pdf").exists()
+    body = r.json()
+    assert body["filename"] == "new.pdf"
+    assert body["status"] == "pending"
+    assert body["id"]
+
+    r2 = client.get("/api/v1/documents", headers=AUTH)
+    assert r2.status_code == 200
+    assert any(d["id"] == body["id"] and d["filename"] == "new.pdf" for d in r2.json())
 
 
 def test_upload_rejects_non_pdf(client):

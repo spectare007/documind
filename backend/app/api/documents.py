@@ -39,12 +39,7 @@ def upload_document(file: UploadFile) -> DocumentOut:
     logger.info("uploaded %s", target.name)
     doc_id = IngestionPipeline().ingest_file(target)
     with get_session() as s:
-        doc = DocumentRepository(s).get(doc_id)
-        if doc is None:
-            # Ingestion reported success but the ledger row isn't visible yet
-            # (e.g. a mocked/async pipeline) -- respond with what we know.
-            return DocumentOut(id=doc_id, filename=target.name, status="processing")
-        return DocumentOut.model_validate(doc)
+        return DocumentOut.model_validate(DocumentRepository(s).get(doc_id))
 
 
 @router.delete("/{doc_id}", status_code=204)
